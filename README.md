@@ -1,8 +1,8 @@
-# Mimi-CfC ASR
+# Mimi-CfC TTS
 
-**Can Closed-form Continuous-time (CfC / LTC) networks do streaming speech recognition on top of Mimi codec tokens?**
+**Can Closed-form Continuous-time (CfC / LTC) networks generate streaming speech as Mimi codec tokens?**
 
-This is an open research project by [Manifestro](https://github.com/Manifestro). We are building and evaluating a small (50–100M parameter), fully streaming ASR model that reads discrete tokens from the [Mimi](https://huggingface.co/kyutai/mimi) neural audio codec and processes them with CfC recurrent layers, first on their own and then combined with local attention.
+This is an open research project by [Manifestro](https://github.com/Manifestro). We are building and evaluating a small (50–100M parameter) streaming text-to-speech model. A CfC recurrent backbone generates [Mimi](https://huggingface.co/kyutai/mimi) codec tokens frame by frame, and attention supplies the long-range context that CfC cannot hold on its own.
 
 > **Status:** research planning. No code yet. See the [roadmap](#roadmap).
 
@@ -10,82 +10,96 @@ This is an open research project by [Manifestro](https://github.com/Manifestro).
 
 ## Motivation
 
-- **Mimi tokens are known to work for ASR.** Kyutai's streaming speech-to-text models read Mimi tokens with Transformers. Mimi is causal and produces 12.5 frames per second (80 ms per frame) with 8 residual codebooks. The first codebook is distilled from a self-supervised speech model and carries phonetic content.
-- **Recurrent models are known to work for streaming ASR.** LSTM-based RNN-Transducers have powered on-device recognition at the ~100M scale for years.
-- **CfC networks have not been tested here, as far as we know.** CfC is the closed-form approximation of Liquid Time-Constant (LTC) networks. It is a recurrent cell with input-dependent time constants, constant memory per step and natural streaming. It has done well on small time-series and control tasks, but we know of no published results for large-vocabulary ASR at this scale.
+- **Mimi is a natural target for streaming TTS.** It is causal, runs at 12.5 frames per second (80 ms per frame), and uses 8 residual codebooks. Each generated frame can be decoded into audio immediately.
+- **Recurrent generation is cheap to stream.** A CfC cell keeps a fixed-size state: constant memory and compute per frame, no growing KV cache. That suits on-device and low-latency synthesis.
+- **CfC has a limited memory horizon.** Our earlier experiments suggest CfC holds context for only about **8 seconds**. So we do **not** rely on CfC for long-range context. CfC models local dynamics such as articulation, transitions and short-range prosody. Attention and explicit conditioning carry everything longer: the text, the speaker and the style.
+- **As far as we know, this is untested.** We know of no published work on CfC/LTC networks for codec-token speech generation.
 
-Mimi's low frame rate helps a recurrent model a lot. A 10 s utterance is only **125 recurrent steps**, so the main cost of CfC (a nonlinear recurrence that cannot be computed with a parallel scan) stays manageable.
+An open question is whether the ~8 s limit is a limit in **seconds or in recurrent steps**. If it is in steps, Mimi's low frame rate stretches the same number of steps over much more audio. Measuring this is part of the project.
+
+## Design principle: split memory by horizon
+
+| What must be remembered | Horizon | Handled by |
+|---|---|---|
+| Articulation, phone transitions, rhythm | < 1 s | **CfC** |
+| Intra-phrase prosody | 1–8 s | **CfC** + local self-attention |
+| Text still to be spoken | whole utterance | **Cross-attention to text** (stored outside the state) |
+| Speaker identity, style | entire output | **Global conditioning** injected at every step |
+| Long-form (paragraphs) | > 8 s | phrase-level synthesis with carried context |
 
 ## Research questions
 
-1. **RQ1:** Can a pure CfC encoder over Mimi tokens reach usable WER in streaming mode?
-2. **RQ2:** How much does adding causal local (sliding-window) attention help a CfC encoder?
-3. **RQ3:** Does CfC beat other recurrent baselines (LSTM, Mamba2) with the same parameters, data and training budget?
-4. **RQ4:** How do accuracy, latency and inference cost trade off against a causal Transformer?
+1. **RQ1:** Can a CfC backbone with cross-attention to text produce intelligible, natural speech as Mimi tokens in streaming mode?
+2. **RQ2:** Where exactly does CfC's memory run out in TTS, and is the limit in seconds or in recurrent steps?
+3. **RQ3:** How much do local self-attention and global conditioning compensate for the limited memory?
+4. **RQ4:** Does CfC beat other recurrent backbones (LSTM, Mamba2) with the same parameters, data and training budget, and how does it compare with a causal Transformer in quality, latency and cost?
 
 ## Approach
 
 ```
-audio (24 kHz, streaming)
-  └─ Mimi encoder (frozen) ── 12.5 Hz, 8 codebooks × 2048 entries
-       └─ token embeddings (one table per codebook, summed) ── d = 512
-            └─ streaming encoder (16 blocks)
-                 Phase 1: [CfC + FFN] × 16
-                 Phase 2: [CfC + FFN, CfC + FFN, LocalAttn + FFN] repeated
-                 └─ RNN-T head (prediction net + joiner), BPE vocab ≈ 1024
-                    + auxiliary CTC loss on the encoder
+text ── text encoder (non-causal) ──────────────┐
+                                                ▼ cross-attention
+prev. Mimi frame ─ 8 codebook embeddings ─ temporal backbone (CfC blocks) ─ depth module ─ 8 tokens ─ Mimi decoder ─ audio
+                                                ▲                            (codebook by codebook)
+speaker / style embedding ──────────────────────┘ (every step)
 ```
 
-Key design decisions (details in [docs/architecture.md](docs/architecture.md)):
+- **Temporal backbone:** CfC blocks advance one Mimi frame (80 ms) per step. Each block has a CfC mixer, cross-attention to the text and an FFN. Phase 2 adds causal local self-attention.
+- **Depth module:** a small network that predicts the 8 codebooks of a frame one after another, conditioned on the backbone output.
+- **Frozen Mimi:** audio is tokenized once. Training uses teacher forcing on the stored tokens.
 
-- **Frozen Mimi.** Tokens are computed once and stored. LibriSpeech 960 h is under 1 GB of `uint16` tokens.
-- **Transducer (RNN-T) instead of plain CTC.** At 12.5 Hz, fast speech can produce more characters than there are frames. RNN-T can emit several subword tokens per frame and is naturally streaming.
-- **Strictly causal.** We test optional lookahead of 0, 1 and 2 frames (+0/80/160 ms).
-- **Parameter-matched comparisons.** Every encoder variant targets the same budget (~70M total).
+Details are in [docs/architecture.md](docs/architecture.md).
 
 ## Experiment plan
 
-| Phase | Goal | Encoder |
-|---|---|---|
-| 0 | Data pipeline and Mimi tokenization | — |
-| 1 | **Pure CfC**: does it learn at all, and how well? | CfC × 16 |
-| 2 | **Hybrid**: CfC + causal local attention | CfC / LocalAttn |
-| 3 | **Controls**: what does CfC add over other models? | LSTM, Mamba2, causal Transformer |
-| 4 | Scaling, other languages, on-device inference | best of 1–3 |
+| Phase | Goal |
+|---|---|
+| 0 | Data pipeline, Mimi tokenization, the Mimi resynthesis ceiling, a causal Transformer reference |
+| 1 | **Main model:** CfC + cross-attention to text + global conditioning |
+| 2 | **Hybrid:** add causal local self-attention, tune window size and placement |
+| 3 | **Ablations and controls:** pure CfC, text-in-stream, LSTM / Mamba2 / Transformer backbones, memory-horizon study |
+| 4 | Multi-speaker scaling, other languages, on-device inference |
 
-Metrics: WER on LibriSpeech `test-clean` / `test-other`, emission latency, real-time factor on CPU and GPU, and peak memory. The full protocol is in [docs/experiments.md](docs/experiments.md).
+Metrics: intelligibility (ASR-based WER/CER), naturalness (UTMOS, later human MOS), speaker similarity, time to first audio and real-time factor. The full protocol is in [docs/experiments.md](docs/experiments.md).
+
+## Data
+
+| Stage | Dataset | Notes |
+|---|---|---|
+| Feasibility | LJSpeech (~24 h, single speaker) | resampled to 24 kHz |
+| Main | LibriTTS-R (~585 h, multi-speaker) | already 24 kHz |
+| Later | other languages (TBD) | Mimi coverage to be checked first |
 
 ## Hardware
 
 | GPU | Use |
 |---|---|
-| RTX 3060 (12 GB) | development, smoke tests, small runs on `train-clean-100` |
-| T4 / L4 | Mimi tokenization, evaluation, CPU/GPU latency benchmarks |
-| A100 / H100 | main training runs (960 h and beyond) |
+| RTX 3060 (12 GB) | development, smoke tests, LJSpeech runs at reduced size |
+| T4 / L4 | Mimi tokenization, evaluation, latency benchmarks |
+| A100 / H100 | main training runs and controls |
 
 ## Planned repository layout
 
 ```
 configs/        experiment configs (one file per run)
 src/mimicfc/
-  data/         Mimi tokenization, datasets, BPE
-  models/       CfC, local attention, baselines, RNN-T head
+  data/         Mimi tokenization, text processing, datasets
+  models/       CfC, attention blocks, depth module, baselines
   train/        training loop, losses, logging
-  eval/         WER, streaming latency, RTF
-scripts/        entry points (tokenize, train, eval, export)
+  eval/         intelligibility, naturalness, speaker similarity, latency
+scripts/        entry points (tokenize, train, synthesize, eval, export)
 docs/           architecture, experiment protocol, results
 ```
 
 ## Roadmap
 
-- [ ] Phase 0: Mimi tokenization of LibriSpeech, BPE tokenizer, data loaders
-- [ ] Phase 0: causal Transformer + RNN-T reference baseline
-- [ ] Phase 1: CfC encoder, streaming inference, first WER numbers
-- [ ] Phase 1: ablations (codebooks, lookahead, CfC variants, depth/width)
-- [ ] Phase 2: CfC + local attention hybrid
-- [ ] Phase 3: LSTM / Mamba2 / Transformer controls
-- [ ] Phase 4: other languages, scaling, CPU / mobile export
-- [ ] Technical report with all results
+- [ ] Phase 0: Mimi tokenization of LJSpeech and LibriTTS-R, text front end, data loaders
+- [ ] Phase 0: Mimi resynthesis ceiling and causal Transformer reference
+- [ ] Phase 1: CfC + cross-attention model, streaming synthesis, first samples
+- [ ] Phase 2: local self-attention hybrid
+- [ ] Phase 3: memory-horizon study, backbone controls, ablations
+- [ ] Phase 4: multi-speaker scaling, other languages, CPU / mobile export
+- [ ] Technical report with all results and audio samples
 
 ## Contributing
 
@@ -95,11 +109,11 @@ Ideas, critique and experiments are welcome. See [CONTRIBUTING.md](CONTRIBUTING.
 
 - Hasani et al., *Closed-form continuous-time neural networks*, Nature Machine Intelligence, 2022.
 - Hasani et al., *Liquid Time-constant Networks*, AAAI 2021.
-- Défossez et al., *Moshi: a speech-text foundation model for real-time dialogue* (Mimi codec), 2024.
-- Graves, *Sequence Transduction with Recurrent Neural Networks* (RNN-T), 2012.
+- Défossez et al., *Moshi: a speech-text foundation model for real-time dialogue* (Mimi codec, depth transformer), 2024.
+- Copet et al., *Simple and Controllable Music Generation* (MusicGen, codebook delay patterns), 2023.
 - De et al., *Griffin: Mixing Gated Linear Recurrences with Local Attention*, 2024.
-- Panayotov et al., *LibriSpeech: an ASR corpus based on public domain audio books*, ICASSP 2015.
+- Koizumi et al., *LibriTTS-R: A Restored Multi-Speaker Text-to-Speech Corpus*, 2023.
 
 ## License
 
-Code is released under the [Apache License 2.0](LICENSE). Mimi model weights are distributed by Kyutai under their own license (CC-BY 4.0 at the time of writing). Check upstream terms before redistributing weights or derived tokens.
+Code is released under the [Apache License 2.0](LICENSE). Mimi model weights are distributed by Kyutai under their own license (CC-BY 4.0 at the time of writing). Check upstream terms before redistributing weights, derived tokens or generated audio.

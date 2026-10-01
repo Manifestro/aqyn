@@ -15,7 +15,7 @@ When you share a result, include:
 - the config file and git commit,
 - dataset and split,
 - parameter count,
-- WER, latency and RTF as defined in the protocol,
+- the metrics defined in the protocol, plus audio samples,
 - the GPU used and the training time.
 
 ## Pull requests

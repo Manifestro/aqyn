@@ -2,87 +2,105 @@
 
 This document describes the planned model. Every number here is a starting point to be tested, not a final choice.
 
-## 1. Input: Mimi tokens
+## 0. Guiding constraint
+
+Earlier experiments suggest a CfC network holds context for only about **8 seconds**. The architecture therefore never asks CfC to remember anything long-range:
+
+- **The text** is read through cross-attention, not stored in the recurrent state.
+- **Speaker and style** are injected at every step, not memorized.
+- **Long-range structure** beyond the CfC horizon comes from attention (Phase 2) or phrase-level synthesis.
+
+## 1. Output: Mimi tokens
 
 | Property | Value |
 |---|---|
 | Sample rate | 24 kHz |
 | Frame rate | 12.5 Hz (80 ms per frame) |
-| Codebooks used | 8 (residual VQ) |
+| Codebooks generated | 8 (residual VQ) |
 | Codebook size | 2048 |
-| Causality | fully causal, streaming |
+| Decoder | Mimi, frozen, streaming |
 
-- Codebook 0 is semantically distilled and carries most of the phonetic information. Codebooks 1–7 are acoustic.
-- **Embedding:** one table of size `2048 × d` per codebook. The 8 embeddings are summed into a single vector per frame. With `d = 512` this is about 8.4M parameters.
-- **Ablation:** use 1, 4 or 8 codebooks. As a diagnostic upper bound, also feed the continuous pre-quantization Mimi latents.
-- Mimi stays frozen for the whole project. Tokens are precomputed and stored as `uint16` arrays.
+- Codebook 0 is semantically distilled and carries most of the linguistic content. Codebooks 1–7 add acoustic detail.
+- **Ceiling:** the quality of plain Mimi encode/decode at 8 codebooks bounds what any model in this project can reach.
+- **Ablation:** generate 4 vs 8 codebooks to trade quality for speed.
 
-## 2. Encoder
+## 2. Text front end
 
-All blocks use pre-norm residual connections:
+- **Input units:** phonemes from a G2P front end (default) or characters (ablation).
+- **Text encoder:** non-causal Transformer, 4–6 layers, `d = 384–512`, ~8–10M parameters.
+- In the main setup the whole utterance text is known before synthesis starts. Streaming *text input* (for example, from an LLM) is studied in Phase 3 through the text-in-stream variant.
+
+## 3. Temporal backbone
+
+One step per Mimi frame. **Input** at step `t`: the sum of the 8 codebook embeddings of frame `t−1` (`8 × 2048 × 512`, ~8.4M params), plus the speaker/style embedding.
+
+Each block uses pre-norm residual connections:
 
 ```
-x = x + Mixer(Norm(x))
-x = x + FFN(Norm(x))
+x = x + CfC(Norm(x))                   # local dynamics, fixed-size state
+x = x + CrossAttn(Norm(x), text)       # what to say next
+x = x + FFN(Norm(x))                   # 512 → 2048 → 512
 ```
 
-### 2.1 CfC mixer (Phase 1)
+Phase 2 replaces some CfC mixers with causal local self-attention (sliding window of 50–100 frames, which is 4–8 s, with a rolling KV cache).
+
+### 3.1 CfC mixer
 
 - CfC cell (closed-form LTC approximation): hidden size 512, a backbone MLP and gated time-constant heads.
-- Time step `Δt = 1` per frame, since Mimi frames are uniform. Continuous-time behavior can still be useful for dropped or skipped frames.
-- Variants to compare: default CfC, CfC without gate, minimal CfC.
-- Stability: LayerNorm before the cell, gradient clipping, learned initial state or zero state.
+- `Δt = 1` per frame. Variants: default, no-gate, minimal.
+- Stability: LayerNorm before the cell, gradient clipping, learned initial state.
 
-### 2.2 Local attention mixer (Phase 2)
+### 3.2 Cross-attention to text
 
-- Causal multi-head attention with a sliding window of 32–64 frames (2.5–5 s), 8 heads, and RoPE or ALiBi positions.
-- Inference uses a fixed-size rolling KV cache, so memory stays bounded and streaming is preserved.
-- Layout: `[CfC, CfC, Attn]` repeated, which replaces every third CfC mixer.
+- Multi-head attention (8 heads) from the backbone state to the text encoder outputs.
+- Cross-attention TTS can skip or repeat words. Mitigations to evaluate: a guided (diagonal) attention loss, location-aware attention, and monotonic alignment constraints at inference.
 
-### 2.3 FFN
+### 3.3 Global conditioning
 
-`512 → 2048 → 512` with GELU or SwiGLU.
+- Single speaker (LJSpeech): none.
+- Multi-speaker (LibriTTS-R): an embedding from a pretrained speaker encoder, or one learned from a reference clip, injected at every block through FiLM or addition.
 
-### 2.4 Lookahead
+## 4. Depth module
 
-The default is strictly causal (0 frames). An optional right context of 1–2 frames (80–160 ms) comes from a small causal convolution or a delayed output.
+Predicts the 8 codebooks of frame `t` from the backbone output `h_t`:
 
-## 3. Output head
+- **Default:** a small causal Transformer over the codebook axis (4 layers, `d = 256`), as in Moshi. Codebook `k` is predicted given `h_t` and codebooks `0..k−1`.
+- **Ablations:** a small CfC or GRU over the codebook axis, or a MusicGen-style delay pattern with parallel heads (no depth module).
+- **End of speech:** a stop token or stop head on the backbone output.
 
-- **RNN-T** (transducer) over a BPE vocabulary of ~1024 tokens.
-  - Prediction network: embedding plus a 1-layer LSTM (or a stateless prediction net).
-  - Joiner: `tanh(W_enc·h_t + W_pred·g_u) → vocab + blank`.
-- **Auxiliary CTC loss** on the encoder output (weight ~0.3) for faster, more stable convergence.
-- Why not CTC alone: 12.5 frames/s is close to, or below, the character rate of fast speech. With BPE, CTC is viable and will be reported as an ablation.
-
-## 4. Parameter budget (approximate, `d = 512`)
+## 5. Parameter budget (approximate)
 
 | Component | Params |
 |---|---|
-| Codebook embeddings (8 × 2048 × 512) | ~8.4M |
+| Text encoder | ~8–10M |
+| Audio codebook embeddings (8 × 2048 × 512) | ~8.4M |
 | CfC mixer (per block) | ~1.6M |
-| Local attention mixer (per block) | ~1.0M |
+| Cross-attention (per block) | ~1.0M |
 | FFN (per block) | ~2.1M |
-| Encoder, 16 CfC blocks | ~60M |
-| RNN-T prediction net + joiner | ~3–4M |
-| **Total (Phase 1)** | **~72M** |
+| Backbone, 12 blocks | ~56M |
+| Depth module + output heads | ~6–8M |
+| **Total** | **~80M** |
 
-Baseline encoders (LSTM, Mamba2, Transformer) are sized to match the encoder budget within ±5%.
+Baseline backbones (LSTM, Mamba2, Transformer) are sized to match the backbone budget within ±5%.
 
-## 5. Streaming inference
+## 6. Streaming synthesis
 
 Per 80 ms frame:
 
-1. Mimi encodes the new audio frame into 8 tokens.
-2. The tokens are embedded and summed.
-3. Each CfC layer updates its fixed-size state. Each attention layer appends to its rolling KV cache.
-4. The RNN-T greedy (or beam) decoder emits zero or more tokens.
+1. The backbone takes the previous frame's tokens and updates its CfC state (and the KV cache of any local attention).
+2. Cross-attention reads the relevant part of the text.
+3. The depth module samples 8 tokens.
+4. The Mimi decoder turns the frame into 80 ms of audio and sends it out.
 
-Algorithmic latency is 80 ms (one Mimi frame) plus any lookahead. State size is constant for CfC and bounded by the window for local attention.
+Time to first audio is roughly one frame plus the text encoder pass. Memory per stream is constant for CfC and bounded by the window for local attention.
 
-## 6. Open questions
+## 7. Variant: text in stream (Phase 3)
 
-- Is the nonlinear CfC recurrence trainable at 16 layers deep without special initialization?
-- Do the acoustic codebooks help ASR, or does codebook 0 alone suffice?
+The cross-attention can be replaced by feeding time-aligned text tokens directly into the frame stream, with the text leading the audio by a fixed delay (1–2 s), as in Kyutai's delayed-streams TTS. This allows streaming text input, but requires word-level alignments for training and forces CfC to hold the upcoming text in its state. That makes it a direct test of the memory horizon.
+
+## 8. Open questions
+
+- Is the ~8 s horizon measured in seconds or in recurrent steps? (See the memory-horizon study in [experiments.md](experiments.md).)
+- Is cross-attention alignment stable with a recurrent query, or does it need monotonic constraints?
+- Which of the codebooks really need the depth module, and which can be predicted in parallel?
 - How well does Mimi (trained mostly on English) represent other target languages?
-- Is the training throughput of a sequential CfC loop acceptable at 12.5 Hz, or does it need a fused kernel?
