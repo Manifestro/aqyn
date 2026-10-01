@@ -26,8 +26,8 @@ Earlier experiments suggest a CfC network holds context for only about **8 secon
 
 ## 2. Text front end
 
-- **Input units:** phonemes from a G2P front end (default) or characters (ablation).
-- **Text encoder:** non-causal Transformer, 4–6 layers, `d = 384–512`, ~8–10M parameters.
+- **Input units:** characters (current default, no extra dependencies) or phonemes from a G2P front end (planned ablation).
+- **Text encoder:** non-causal Transformer, 4 layers, `d = 384`, ~7M parameters.
 - In the main setup the whole utterance text is known before synthesis starts. Streaming *text input* (for example, from an LLM) is studied in Phase 3 through the text-in-stream variant.
 
 ## 3. Temporal backbone
@@ -72,14 +72,14 @@ Predicts the 8 codebooks of frame `t` from the backbone output `h_t`:
 
 | Component | Params |
 |---|---|
-| Text encoder | ~8–10M |
+| Text encoder | ~7M |
 | Audio codebook embeddings (8 × 2048 × 512) | ~8.4M |
 | CfC mixer (per block) | ~1.6M |
 | Cross-attention (per block) | ~1.0M |
 | FFN (per block) | ~2.1M |
-| Backbone, 12 blocks | ~56M |
-| Depth module + output heads | ~6–8M |
-| **Total** | **~80M** |
+| Backbone, 12 CfC blocks | ~57M |
+| Depth module + output heads | ~11M |
+| **Total** | **~84M** |
 
 Baseline backbones (LSTM, Mamba2, Transformer) are sized to match the backbone budget within ±5%.
 

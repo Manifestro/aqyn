@@ -12,10 +12,10 @@ Preprocessing:
 
 1. Resample audio to 24 kHz (LJSpeech is 22.05 kHz; LibriTTS-R is already 24 kHz).
 2. Encode with frozen Mimi and store 8 codebooks as `uint16`, shape `[T, 8]`.
-3. Normalize text and convert it to phonemes (G2P). Characters are kept for the ablation.
+3. Normalize text and map it to characters. Phonemes (G2P) are a planned ablation.
 4. For the text-in-stream variant only: word-level forced alignments (for example, Montreal Forced Aligner).
 
-Held-out evaluation: the standard LJSpeech test split and LibriTTS-R `test-clean`, plus a fixed set of long texts (paragraphs) for the long-form tests.
+Held-out evaluation: a fixed random LJSpeech split (seed 1234: 500 test, 100 val) and LibriTTS-R `test-clean`, plus a fixed set of long texts (paragraphs) for the long-form tests.
 
 ## Phases
 

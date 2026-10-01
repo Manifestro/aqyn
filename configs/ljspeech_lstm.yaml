@@ -1,0 +1,9 @@
+# Phase 3 control: LSTM backbone at a matched budget (11 blocks, ~85M params).
+data:
+  root: data/ljspeech_tokens
+  max_frames_per_batch: 3000
+model:
+  layers: [lstm, lstm, lstm, lstm, lstm, lstm, lstm, lstm, lstm, lstm, lstm]
+train:
+  out_dir: runs/ljspeech_lstm
+  max_steps: 100000

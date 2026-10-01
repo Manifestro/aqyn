@@ -1,0 +1,10 @@
+# Phase 0 reference: causal Transformer backbone at a matched budget (14 blocks, ~84M params).
+data:
+  root: data/ljspeech_tokens
+  max_frames_per_batch: 3000
+model:
+  layers: [attn, attn, attn, attn, attn, attn, attn, attn, attn, attn, attn, attn, attn, attn]
+  audio_pos_emb: true
+train:
+  out_dir: runs/ljspeech_transformer
+  max_steps: 100000

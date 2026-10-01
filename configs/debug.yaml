@@ -1,0 +1,24 @@
+# Tiny model for smoke tests: checks the whole pipeline in a few minutes.
+data:
+  root: data/ljspeech_tokens
+  max_frames_per_batch: 1000
+  num_workers: 0
+model:
+  text_dim: 64
+  text_layers: 1
+  text_heads: 2
+  dim: 64
+  layers: [cfc, local]
+  heads: 2
+  cfc_backbone_units: 64
+  depth_dim: 32
+  depth_layers: 1
+  depth_heads: 2
+train:
+  out_dir: runs/debug
+  max_steps: 200
+  warmup_steps: 20
+  log_every: 10
+  eval_every: 100
+  save_every: 100
+  sample_every: 200

@@ -4,7 +4,7 @@
 
 This is an open research project by [Manifestro](https://github.com/Manifestro). We are building and evaluating a small (50–100M parameter) streaming text-to-speech model. A CfC recurrent backbone generates [Mimi](https://huggingface.co/kyutai/mimi) codec tokens frame by frame, and attention supplies the long-range context that CfC cannot hold on its own.
 
-> **Status:** research planning. No code yet. See the [roadmap](#roadmap).
+> **Status:** Phase 0/1 code is ready (data pipeline, models, training, evaluation). No trained results yet. See the [roadmap](#roadmap).
 
 ---
 
@@ -78,24 +78,74 @@ Metrics: intelligibility (ASR-based WER/CER), naturalness (UTMOS, later human MO
 | T4 / L4 | Mimi tokenization, evaluation, latency benchmarks |
 | A100 / H100 | main training runs and controls |
 
-## Planned repository layout
+## Quick start
+
+Requires Python 3.10+ and a CUDA GPU (an RTX 3060 with 12 GB is enough for LJSpeech).
+
+```bash
+# 1. Install PyTorch for your CUDA version first (see pytorch.org), then:
+pip install -e ".[eval,dev]"
+pytest -q                                  # unit tests, run on CPU in seconds
+
+# 2. Download LJSpeech (~2.6 GB) and encode it with Mimi (~10-20 min on a GPU)
+python scripts/prepare_ljspeech.py --out data/ljspeech_tokens
+
+# 3. Smoke test: a tiny model for 200 steps (a few minutes)
+python scripts/train.py --config configs/debug.yaml
+
+# 4. Main Phase 1 run (CfC + cross-attention)
+python scripts/train.py --config configs/ljspeech_cfc.yaml
+#    out of memory? lower the batch:   ... data.max_frames_per_batch=2000
+#    resume after a stop:               ... --resume runs/ljspeech_cfc/last.pt
+
+# 5. Listen and measure
+python scripts/synthesize.py --ckpt runs/ljspeech_cfc/best.pt --text "Hello, this is a test." --out hello.wav
+python scripts/evaluate.py --ceiling --data data/ljspeech_tokens --out results/mimi_ceiling
+python scripts/evaluate.py --ckpt runs/ljspeech_cfc/best.pt --out results/ljspeech_cfc --utmos
+```
+
+Training logs go to `runs/<name>/log.jsonl`, checkpoints to `best.pt` / `last.pt`, and audio samples to `runs/<name>/samples/`.
+
+### Configs
+
+| Config | Backbone | Params | Phase |
+|---|---|---|---|
+| `configs/ljspeech_transformer.yaml` | causal Transformer, 14 blocks | 85.7M | 0 (reference) |
+| `configs/ljspeech_cfc.yaml` | CfC, 12 blocks | 83.6M | 1 (main) |
+| `configs/ljspeech_hybrid.yaml` | CfC + local attention (8 s window), 12 blocks | 81.5M | 2 |
+| `configs/ljspeech_lstm.yaml` | LSTM, 11 blocks | 84.7M | 3 (control) |
+| `configs/debug.yaml` | tiny CfC + local attention | 2.2M | smoke test |
+
+All backbones are matched within ±5% of the CfC backbone. Any config value can be overridden from the command line, for example `train.lr=1e-4`.
+
+## Repository layout
 
 ```
-configs/        experiment configs (one file per run)
+configs/              experiment configs (one file per run)
+scripts/
+  prepare_ljspeech.py download LJSpeech, resample, encode with Mimi
+  train.py            training
+  synthesize.py       text -> wav, with first-frame latency and RTF
+  evaluate.py         ASR WER/CER, UTMOS, latency; also the Mimi ceiling
 src/mimicfc/
-  data/         Mimi tokenization, text processing, datasets
-  models/       CfC, attention blocks, depth module, baselines
-  train/        training loop, losses, logging
-  eval/         intelligibility, naturalness, speaker similarity, latency
-scripts/        entry points (tokenize, train, synthesize, eval, export)
-docs/           architecture, experiment protocol, results
+  codec.py            frozen Mimi wrapper
+  text.py             text normalization, character vocabulary
+  data.py             token datasets, length-bucketed batching
+  models/cfc.py       CfC cell (default / no_gate / pure)
+  models/blocks.py    CfC, LSTM, attention mixers; cross-attention; streaming step()
+  models/tts.py       text encoder, backbone, depth module, losses, generation
+  train.py            training loop
+tests/                streaming-vs-training parity, losses, generation
+docs/                 architecture, experiment protocol
 ```
 
 ## Roadmap
 
-- [ ] Phase 0: Mimi tokenization of LJSpeech and LibriTTS-R, text front end, data loaders
+- [x] Phase 0: Mimi tokenization of LJSpeech, text front end, data loaders
+- [ ] Phase 0: LibriTTS-R preparation
 - [ ] Phase 0: Mimi resynthesis ceiling and causal Transformer reference
-- [ ] Phase 1: CfC + cross-attention model, streaming synthesis, first samples
+- [x] Phase 1: CfC + cross-attention model and streaming synthesis (code)
+- [ ] Phase 1: first trained models and samples
 - [ ] Phase 2: local self-attention hybrid
 - [ ] Phase 3: memory-horizon study, backbone controls, ablations
 - [ ] Phase 4: multi-speaker scaling, other languages, CPU / mobile export

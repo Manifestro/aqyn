@@ -1,0 +1,10 @@
+# Phase 2: CfC + causal local self-attention (8 s window) + cross-attention (~82M params).
+data:
+  root: data/ljspeech_tokens
+  max_frames_per_batch: 3000
+model:
+  layers: [cfc, cfc, local, cfc, cfc, local, cfc, cfc, local, cfc, cfc, local]
+  local_window: 100
+train:
+  out_dir: runs/ljspeech_hybrid
+  max_steps: 100000
