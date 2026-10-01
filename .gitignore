@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.env
+
+# Tooling
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Data, tokens, checkpoints
+data/
+tokens/
+checkpoints/
+*.ckpt
+*.pt
+*.safetensors
+*.npy
+
+# Experiment tracking
+wandb/
+runs/
+outputs/
+lightning_logs/
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
