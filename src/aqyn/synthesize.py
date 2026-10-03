@@ -22,6 +22,7 @@ def add_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--top-k", type=int, default=50)
     ap.add_argument("--max-frames", type=int, default=500)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--speaker", type=int, default=0, help="speaker index (multi-speaker models)")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
 
 
@@ -46,6 +47,7 @@ def run(args: argparse.Namespace) -> None:
     codes = model.generate(
         text,
         word_starts,
+        speaker=torch.tensor([args.speaker], device=args.device),
         max_frames=args.max_frames,
         temperature=args.temperature,
         top_k=args.top_k,

@@ -143,6 +143,7 @@ def run(args: argparse.Namespace) -> None:
             codes = model.generate(
                 text,
                 word_starts,
+                speaker=torch.tensor([item["speaker"]], device=args.device),
                 max_frames=int(args.max_ratio * len(item["codes"])) + 10,
                 temperature=args.temperature,
                 top_k=args.top_k,

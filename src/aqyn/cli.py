@@ -6,7 +6,7 @@ import argparse
 import importlib
 
 COMMANDS = {
-    "prepare": ("prepare", "download LJSpeech and encode it with Mimi"),
+    "prepare": ("prepare", "download a corpus (LJSpeech, LibriTTS-R) and encode it with Mimi"),
     "train": ("train", "train a model from a YAML config"),
     "synth": ("synthesize", "synthesize speech from text"),
     "eval": ("evaluate", "evaluate a checkpoint or the Mimi ceiling"),

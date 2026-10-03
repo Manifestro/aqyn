@@ -1,0 +1,12 @@
+# Multi-speaker run: same CfC backbone as ljspeech_cfc, trained on LibriTTS-R
+# (train-clean-100 + train-clean-360, ~245 h). The speaker table size comes from the data.
+data:
+  root: data/libritts_r_tokens
+  max_frames_per_batch: 3000
+  num_workers: 4
+model:
+  layers: [cfc, cfc, cfc, cfc, cfc, cfc, cfc, cfc, cfc, cfc, cfc, cfc]
+  cfc_mode: default
+train:
+  out_dir: runs/libritts_r_cfc
+  max_steps: 100000

@@ -1,9 +1,12 @@
-"""Download LJSpeech, resample to 24 kHz, and encode it with frozen Mimi.
+"""Download a corpus, resample to 24 kHz, and encode it with frozen Mimi.
 
     uv run aqyn prepare --out data/ljspeech_tokens
+    uv run aqyn prepare --dataset libritts_r --out data/libritts_r_tokens
 
 Writes ``vocab.json``, ``{train,val,test}.jsonl`` and ``{split}_codes.npy`` (see aqyn/data.py).
-The split is a fixed random split (seed 1234): 500 test, 100 val, the rest train.
+The split is a fixed random split over utterances (seed 1234): 500 test, 100 val, the rest
+train. For LibriTTS-R every speaker is therefore seen in training; ``speakers.json`` lists
+the corpus speaker ids in the order of the ``speaker`` index stored in the manifests.
 """
 
 from __future__ import annotations
@@ -17,7 +20,9 @@ import urllib.request
 from pathlib import Path
 
 import numpy as np
+import soundfile as sf
 import torch
+from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 from .align import CTC_SAMPLE_RATE, CTCAligner
@@ -25,6 +30,7 @@ from .codec import FRAME_RATE, Mimi, load_audio
 from .text import CharVocab, normalize_text, words_of
 
 URL = "https://data.keithito.com/data/speech/LJSpeech-1.1.tar.bz2"
+LIBRITTS_R_URL = "https://www.openslr.org/resources/141/{name}.tar.gz"
 
 
 def download(url: str, dest: Path) -> None:
@@ -58,8 +64,63 @@ def read_metadata(root: Path) -> list[dict]:
     with open(root / "metadata.csv", encoding="utf-8") as f:
         for row in csv.reader(f, delimiter="|", quoting=csv.QUOTE_NONE):
             text = row[2] if len(row) > 2 and row[2].strip() else row[1]
-            items.append({"id": row[0], "text": text})
+            path = str(root / "wavs" / f"{row[0]}.wav")
+            items.append({"id": row[0], "text": text, "path": path, "speaker": 0})
     return items
+
+
+def ensure_libritts_r(raw_dir: Path, subsets: list[str]) -> Path:
+    root = raw_dir / "LibriTTS_R"
+    for subset in subsets:
+        if (root / subset).is_dir():
+            continue
+        name = subset.replace("-", "_")
+        archive = raw_dir / f"{name}.tar.gz"
+        if not archive.exists():
+            print(f"Downloading LibriTTS-R {subset} to {archive}")
+            download(LIBRITTS_R_URL.format(name=name), archive)
+        print(f"Extracting {subset}...")
+        with tarfile.open(archive) as tar:
+            tar.extractall(raw_dir)
+    return root
+
+
+def read_libritts_r(root: Path, subsets: list[str]) -> tuple[list[dict], list[str]]:
+    """Utterances of ``root/<subset>/<speaker>/<chapter>/*.wav`` and the sorted speaker ids."""
+    found = []
+    for subset in subsets:
+        for wav in sorted((root / subset).glob("*/*/*.wav")):
+            txt = wav.with_suffix(".normalized.txt")
+            if txt.exists():
+                found.append((wav, txt.read_text(encoding="utf-8").strip()))
+    speakers = sorted({wav.parts[-3] for wav, _ in found}, key=int)
+    index = {s: i for i, s in enumerate(speakers)}
+    items = [
+        {"id": wav.stem, "text": text, "path": str(wav), "speaker": index[wav.parts[-3]]}
+        for wav, text in found
+    ]
+    return items, speakers
+
+
+class _Audio(Dataset):
+    """Loads each utterance at the Mimi and CTC sample rates (in DataLoader workers)."""
+
+    def __init__(self, items: list[dict], min_seconds: float, max_seconds: float):
+        self.items, self.min_seconds, self.max_seconds = items, min_seconds, max_seconds
+
+    def __len__(self) -> int:
+        return len(self.items)
+
+    def __getitem__(self, i: int):
+        path = self.items[i]["path"]
+        info = sf.info(path)
+        if not self.min_seconds <= info.frames / info.samplerate <= self.max_seconds:
+            return None
+        return load_audio(path), load_audio(path, CTC_SAMPLE_RATE)
+
+
+def _identity(x):
+    return x
 
 
 def word_start_frames(spans: list[tuple[float, float]], frames: int) -> list[int]:
@@ -72,10 +133,19 @@ def word_start_frames(spans: list[tuple[float, float]], frames: int) -> list[int
 
 
 def add_args(ap: argparse.ArgumentParser) -> None:
+    ap.add_argument("--dataset", default="ljspeech", choices=["ljspeech", "libritts_r"])
     ap.add_argument("--out", default="data/ljspeech_tokens")
     ap.add_argument(
-        "--raw-dir", default="data/raw", help="where LJSpeech is (or will be) downloaded"
+        "--raw-dir", default="data/raw", help="where the corpus is (or will be) downloaded"
     )
+    ap.add_argument(
+        "--subsets",
+        default="train-clean-100,train-clean-360",
+        help="LibriTTS-R subsets to pool (comma separated)",
+    )
+    ap.add_argument("--min-seconds", type=float, default=0.5, help="skip shorter utterances")
+    ap.add_argument("--max-seconds", type=float, default=20.0, help="skip longer utterances")
+    ap.add_argument("--workers", type=int, default=8, help="audio loading processes")
     ap.add_argument(
         "--ljspeech-dir", default=None, help="existing extracted LJSpeech-1.1 directory"
     )
@@ -94,8 +164,14 @@ def add_args(ap: argparse.ArgumentParser) -> None:
 
 def run(args: argparse.Namespace) -> None:
 
-    root = Path(args.ljspeech_dir) if args.ljspeech_dir else ensure_ljspeech(Path(args.raw_dir))
-    items = read_metadata(root)
+    speakers = None
+    if args.dataset == "libritts_r":
+        subsets = [s for s in args.subsets.split(",") if s]
+        items, speakers = read_libritts_r(ensure_libritts_r(Path(args.raw_dir), subsets), subsets)
+        print(f"LibriTTS-R: {len(items)} utterances, {len(speakers)} speakers")
+    else:
+        root = Path(args.ljspeech_dir) if args.ljspeech_dir else ensure_ljspeech(Path(args.raw_dir))
+        items = read_metadata(root)
     items = [it for it in items if normalize_text(it["text"])]
     random.Random(1234).shuffle(items)
     if args.limit:
@@ -113,26 +189,42 @@ def run(args: argparse.Namespace) -> None:
     vocab = CharVocab.build([it["text"] for it in splits["train"]])
     vocab.save(out / "vocab.json")
     print(f"vocab: {len(vocab)} symbols")
+    if speakers is not None:
+        with open(out / "speakers.json", "w", encoding="utf-8") as f:
+            json.dump(speakers, f)
 
     mimi = Mimi(args.device)
     aligner = CTCAligner(args.align_model, args.device)
     for split, split_items in splits.items():
-        chunks, offset, failed = [], 0, 0
+        chunks, offset, failed, skipped = [], 0, 0, 0
+        # LJSpeech has no length limits: its clips are all 1-10 s.
+        limits = (args.min_seconds, args.max_seconds) if speakers is not None else (0.0, 1e9)
+        loader = DataLoader(
+            _Audio(split_items, *limits),
+            batch_size=None,
+            num_workers=args.workers,
+            collate_fn=_identity,
+        )
         with open(out / f"{split}.jsonl", "w", encoding="utf-8") as f:
-            for it in tqdm(split_items, desc=split):
-                path = str(root / "wavs" / f"{it['id']}.wav")
+            for it, audio in zip(
+                split_items, tqdm(loader, desc=split, mininterval=30), strict=True
+            ):
+                if audio is None:
+                    skipped += 1
+                    continue
+                wav, wav_ctc = audio
                 words = words_of(it["text"])
-                spans = aligner.align(load_audio(path, CTC_SAMPLE_RATE), CTC_SAMPLE_RATE, words)
+                spans = aligner.align(wav_ctc, CTC_SAMPLE_RATE, words)
                 if spans is None:
                     failed += 1
                     continue
-                codes = mimi.encode(load_audio(path)).numpy().astype(np.uint16)
+                codes = mimi.encode(wav).numpy().astype(np.uint16)
                 rec = {
                     "id": it["id"],
                     "text": it["text"],
                     "offset": offset,
                     "frames": len(codes),
-                    "speaker": 0,
+                    "speaker": it["speaker"],
                     "word_frames": word_start_frames(spans, len(codes)),
                 }
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -143,5 +235,5 @@ def run(args: argparse.Namespace) -> None:
         hours = offset / 12.5 / 3600
         print(
             f"{split}: {len(chunks)} utterances, {offset} frames ({hours:.2f} h), "
-            f"{failed} dropped (alignment failed)"
+            f"{failed} dropped (alignment failed), {skipped} skipped (length)"
         )

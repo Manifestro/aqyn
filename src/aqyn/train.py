@@ -79,7 +79,11 @@ def write_samples(model, dataset, out_dir: Path, step: int, device, mimi_holder:
     out_dir.mkdir(parents=True, exist_ok=True)
     for i in range(min(n, len(dataset))):
         item = dataset[i]
-        codes = model.generate(item["text"].to(device), item["word_starts"].to(device))
+        codes = model.generate(
+            item["text"].to(device),
+            item["word_starts"].to(device),
+            speaker=torch.tensor([item["speaker"]], device=device),
+        )
         save_audio(out_dir / f"step{step:07d}_{item['id']}.wav", mimi.decode(codes))
     model.train()
 
@@ -94,13 +98,18 @@ def train(cfg: Config, resume: str | None = None) -> None:
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
 
+    train_ds = TokenDataset(cfg.data.root, "train", cfg.data.max_utt_frames)
+    val_ds = TokenDataset(cfg.data.root, "val", cfg.data.max_utt_frames)
+    # The speaker table follows the data, so one config serves any prepared corpus.
+    num_speakers = 1 + max(it.get("speaker", 0) for it in train_ds.items + val_ds.items)
+    if num_speakers > cfg.model.num_speakers:
+        print(f"model.num_speakers: {cfg.model.num_speakers} -> {num_speakers} (from the data)")
+        cfg.model.num_speakers = num_speakers
+
     out_dir = Path(tcfg.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     with open(out_dir / "config.yaml", "w", encoding="utf-8") as f:
         yaml.safe_dump(cfg.to_dict(), f, sort_keys=False)
-
-    train_ds = TokenDataset(cfg.data.root, "train", cfg.data.max_utt_frames)
-    val_ds = TokenDataset(cfg.data.root, "val", cfg.data.max_utt_frames)
     vocab = train_ds.vocab
     collate = make_collate(vocab.pad_id)
     sampler = FrameBudgetSampler(
