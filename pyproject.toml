@@ -1,38 +1,51 @@
-[build-system]
-requires = ["setuptools>=68"]
-build-backend = "setuptools.build_meta"
-
 [project]
-name = "mimicfc"
+name = "aqyn"
 version = "0.1.0"
-description = "Streaming text-to-speech research with CfC networks over Mimi codec tokens"
+description = "Aqyn: streaming text-to-speech research with CfC networks over Mimi codec tokens"
 readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
 dependencies = [
-    "torch>=2.2",
+    "torch>=2.7",
     "transformers>=4.45",
     "numpy",
     "soundfile",
     "soxr",
     "pyyaml",
     "tqdm",
+    "jiwer",
 ]
 
-[project.optional-dependencies]
-eval = ["jiwer"]
+[project.scripts]
+aqyn = "aqyn.cli:main"
+
+[dependency-groups]
 dev = ["pytest", "ruff"]
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/aqyn"]
+
+# CUDA 12.8 builds of PyTorch on Linux and Windows (RTX 20xx-50xx, T4, L4, A100, H100).
+# macOS gets the regular CPU/MPS build from PyPI.
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu128", marker = "sys_platform == 'linux' or sys_platform == 'win32'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
 
 [tool.ruff]
 line-length = 100
 target-version = "py310"
 
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "SIM"]
 ignore = ["E501", "SIM115"]  # formatter handles line length; the log file stays open for a run
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

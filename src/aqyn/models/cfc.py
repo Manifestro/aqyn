@@ -15,7 +15,10 @@ only the recurrent part runs inside the time loop.
 
 from __future__ import annotations
 
+import contextlib
+
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 MODES = ("default", "no_gate", "pure")
@@ -72,19 +75,96 @@ class CfCCell(nn.Module):
         return self.in_proj(x)
 
     def step(self, x_proj: torch.Tensor, h: torch.Tensor, dt: float = 1.0) -> torch.Tensor:
-        z = lecun_tanh(x_proj + self.rec_proj(h))
-        for layer in self.backbone:
-            z = lecun_tanh(layer(z))
-        z = self.dropout(z)
-        if self.mode == "pure":
-            f1 = self.heads(z)
-            return -self.A * torch.exp(-dt * (self.w_tau.abs() + f1.abs())) * f1 + self.A
-        f1, f2, ta, tb = self.heads(z).chunk(4, dim=-1)
-        f1, f2 = torch.tanh(f1), torch.tanh(f2)
-        gate = torch.sigmoid(ta * dt + tb)
-        if self.mode == "no_gate":
-            return f1 + gate * f2
-        return f1 * (1.0 - gate) + gate * f2
+        backbone = tuple((layer.weight, layer.bias) for layer in self.backbone)
+        pure = self.mode == "pure"
+        return _STEP[0](
+            x_proj,
+            h,
+            self.rec_proj.weight,
+            backbone,
+            self.heads.weight,
+            self.heads.bias,
+            self.w_tau if pure else None,
+            self.A if pure else None,
+            self.mode,
+            dt,
+            self.dropout.p,
+            self.training,
+        )
+
+
+def cfc_step(
+    x_proj: torch.Tensor,
+    h: torch.Tensor,
+    rec_w: torch.Tensor,
+    backbone: tuple,
+    heads_w: torch.Tensor,
+    heads_b: torch.Tensor,
+    w_tau: torch.Tensor | None,
+    A: torch.Tensor | None,
+    mode: str,
+    dt: float,
+    p_drop: float,
+    training: bool,
+) -> torch.Tensor:
+    """One CfC update as a pure function, so a single compiled graph serves every layer."""
+    z = lecun_tanh(x_proj + F.linear(h, rec_w))
+    for w, b in backbone:
+        z = lecun_tanh(F.linear(z, w, b))
+    z = F.dropout(z, p_drop, training)
+    if mode == "pure":
+        f1 = F.linear(z, heads_w, heads_b)
+        return -A * torch.exp(-dt * (w_tau.abs() + f1.abs())) * f1 + A
+    f1, f2, ta, tb = F.linear(z, heads_w, heads_b).chunk(4, dim=-1)
+    f1, f2 = torch.tanh(f1), torch.tanh(f2)
+    gate = torch.sigmoid(ta * dt + tb)
+    if mode == "no_gate":
+        return f1 + gate * f2
+    return f1 * (1.0 - gate) + gate * f2
+
+
+# The step implementation in use; enable_compiled_step() swaps in a compiled version.
+_STEP = [cfc_step]
+
+
+def enable_compiled_step(device: torch.device, autocast=None) -> bool:
+    """Compile the CfC step with ``torch.compile`` so its ~15 small kernels fuse into a few.
+
+    Runs a short self-test (train and inference, with and without autocast). If anything
+    fails, for example no Triton on this platform, it stays on the eager version and
+    returns False.
+    """
+    try:
+        compiled = torch.compile(cfc_step, dynamic=True)
+        d = 64
+        lin = nn.Linear(d, 4 * d).to(device)
+        rec = torch.randn(d, d, device=device, requires_grad=True)
+        contexts = [contextlib.nullcontext]
+        if autocast is not None:
+            contexts.append(autocast)
+        for ctx in contexts:
+            for b in (3, 5):  # two batch sizes, to settle dynamic shapes
+                x = torch.randn(b, d, device=device)
+                h = torch.zeros(b, d, device=device)
+                with ctx():
+                    y = compiled(
+                        x, h, rec, (), lin.weight, lin.bias, None, None, "default", 1.0, 0.1, True
+                    )
+                y.float().sum().backward()
+                with torch.no_grad(), ctx():
+                    compiled(
+                        x, h, rec, (), lin.weight, lin.bias, None, None, "default", 1.0, 0.0, False
+                    )
+    except Exception as e:  # noqa: BLE001 - any compiler failure means "use eager"
+        print(f"[cfc] torch.compile unavailable, using eager CfC step: {type(e).__name__}: {e}")
+        _STEP[0] = cfc_step
+        return False
+    _STEP[0] = compiled
+    return True
+
+
+def disable_compiled_step() -> None:
+    _STEP[0] = cfc_step
 
 
 class CfC(nn.Module):

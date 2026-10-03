@@ -1,4 +1,6 @@
-# Mimi-CfC TTS
+# Aqyn
+
+*Aqyn (акын) is a Kazakh improvising poet-singer who composes and performs in real time.*
 
 **Can Closed-form Continuous-time (CfC / LTC) networks generate streaming speech as Mimi codec tokens?**
 
@@ -80,31 +82,34 @@ Metrics: intelligibility (ASR-based WER/CER), naturalness (UTMOS, later human MO
 
 ## Quick start
 
-Requires Python 3.10+ and a CUDA GPU (an RTX 3060 with 12 GB is enough for LJSpeech).
+Requires [uv](https://docs.astral.sh/uv/) and an NVIDIA GPU (an RTX 3060 with 12 GB is enough for LJSpeech). On Linux and Windows, uv installs the CUDA 12.8 build of PyTorch automatically.
 
 ```bash
-# 1. Install PyTorch for your CUDA version first (see pytorch.org), then:
-pip install -e ".[eval,dev]"
-pytest -q                                  # unit tests, run on CPU in seconds
+uv sync                                     # create .venv and install everything
+uv run pytest -q                            # unit tests (CPU, seconds)
 
-# 2. Download LJSpeech (~2.6 GB) and encode it with Mimi (~10-20 min on a GPU)
-python scripts/prepare_ljspeech.py --out data/ljspeech_tokens
+uv run aqyn prepare                         # download LJSpeech (~2.6 GB), encode with Mimi
+uv run aqyn bench --config configs/ljspeech_cfc.yaml   # speed and memory per batch size on your GPU
+uv run aqyn train --config configs/debug.yaml          # smoke test, a few minutes
+uv run aqyn train --config configs/ljspeech_cfc.yaml   # main Phase 1 run
 
-# 3. Smoke test: a tiny model for 200 steps (a few minutes)
-python scripts/train.py --config configs/debug.yaml
-
-# 4. Main Phase 1 run (CfC + cross-attention)
-python scripts/train.py --config configs/ljspeech_cfc.yaml
-#    out of memory? lower the batch:   ... data.max_frames_per_batch=2000
-#    resume after a stop:               ... --resume runs/ljspeech_cfc/last.pt
-
-# 5. Listen and measure
-python scripts/synthesize.py --ckpt runs/ljspeech_cfc/best.pt --text "Hello, this is a test." --out hello.wav
-python scripts/evaluate.py --ceiling --data data/ljspeech_tokens --out results/mimi_ceiling
-python scripts/evaluate.py --ckpt runs/ljspeech_cfc/best.pt --out results/ljspeech_cfc --utmos
+uv run aqyn synth --ckpt runs/ljspeech_cfc/best.pt --text "Hello, this is a test." --out hello.wav
+uv run aqyn eval --ceiling --data data/ljspeech_tokens --out results/mimi_ceiling
+uv run aqyn eval --ckpt runs/ljspeech_cfc/best.pt --out results/ljspeech_cfc --utmos
 ```
 
+- Any config value can be overridden at the end of the command, e.g. `data.max_frames_per_batch=6000` (use `aqyn bench` to pick it).
+- Resume a stopped run with `--resume runs/<name>/last.pt`.
+- `uv run aqyn <command> --help` shows all options.
+
 Training logs go to `runs/<name>/log.jsonl`, checkpoints to `best.pt` / `last.pt`, and audio samples to `runs/<name>/samples/`.
+
+### Training speed
+
+CfC is a nonlinear recurrence, so it runs one frame at a time (12 blocks × ~100 frames = ~1200 sequential steps per batch). To keep the GPU busy:
+
+- **Use the largest batch that fits.** The number of sequential steps does not grow with batch size, so throughput scales almost linearly. `aqyn bench` measures this.
+- **Compiled CfC step (on by default on CUDA).** `torch.compile` fuses the ~15 small kernels of each step into a few. If compilation is unavailable (for example, Windows without Triton), training falls back to the eager step automatically. Disable with `train.compile_cfc=false`.
 
 ### Configs
 
@@ -122,19 +127,19 @@ All backbones are matched within ±5% of the CfC backbone. Any config value can 
 
 ```
 configs/              experiment configs (one file per run)
-scripts/
-  prepare_ljspeech.py download LJSpeech, resample, encode with Mimi
-  train.py            training
+src/aqyn/
+  cli.py              `aqyn` command: prepare / train / synth / eval / bench
+  prepare.py          download LJSpeech, resample, encode with Mimi
+  train.py            training loop
   synthesize.py       text -> wav, with first-frame latency and RTF
   evaluate.py         ASR WER/CER, UTMOS, latency; also the Mimi ceiling
-src/mimicfc/
+  bench.py            speed and memory benchmark on synthetic batches
   codec.py            frozen Mimi wrapper
   text.py             text normalization, character vocabulary
   data.py             token datasets, length-bucketed batching
-  models/cfc.py       CfC cell (default / no_gate / pure)
+  models/cfc.py       CfC cell (default / no_gate / pure), compiled step
   models/blocks.py    CfC, LSTM, attention mixers; cross-attention; streaming step()
   models/tts.py       text encoder, backbone, depth module, losses, generation
-  train.py            training loop
 tests/                streaming-vs-training parity, losses, generation
 docs/                 architecture, experiment protocol
 ```

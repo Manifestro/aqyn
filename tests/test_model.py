@@ -1,9 +1,9 @@
 import pytest
 import torch
 
-from mimicfc.config import ModelConfig, TrainConfig
-from mimicfc.models import TTSModel, count_parameters
-from mimicfc.models.cfc import CfC
+from aqyn.config import ModelConfig, TrainConfig
+from aqyn.models import TTSModel, count_parameters
+from aqyn.models.cfc import CfC
 
 VOCAB = 40
 PAD = 0

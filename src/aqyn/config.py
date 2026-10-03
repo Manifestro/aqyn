@@ -12,7 +12,7 @@ import yaml
 
 @dataclass
 class DataConfig:
-    root: str = "data/ljspeech_tokens"  # output of scripts/prepare_ljspeech.py
+    root: str = "data/ljspeech_tokens"  # output of `aqyn prepare`
     max_frames_per_batch: int = 3000  # batch size in Mimi frames (12.5 per second)
     max_utt_frames: int = 250  # drop longer utterances (20 s)
     num_workers: int = 2
@@ -67,7 +67,7 @@ class TrainConfig:
     guided_attn_weight: float = 1.0
     guided_attn_sigma: float = 0.2
     seed: int = 0
-    compile: bool = False
+    compile_cfc: bool = True  # fuse the CfC step with torch.compile on CUDA (falls back to eager)
 
 
 @dataclass

@@ -1,4 +1,9 @@
-"""Training loop."""
+"""Train a model from a YAML config.
+
+uv run aqyn train --config configs/ljspeech_cfc.yaml
+uv run aqyn train --config configs/ljspeech_cfc.yaml data.max_frames_per_batch=6000
+uv run aqyn train --config configs/ljspeech_cfc.yaml --resume runs/ljspeech_cfc/last.pt
+"""
 
 from __future__ import annotations
 
@@ -19,6 +24,7 @@ from .checkpoint import save_checkpoint
 from .config import Config, load_config
 from .data import FrameBudgetSampler, TokenDataset, make_collate
 from .models import TTSModel, count_parameters
+from .models.cfc import enable_compiled_step
 
 
 def lr_at(step: int, cfg) -> float:
@@ -139,7 +145,9 @@ def train(cfg: Config, resume: str | None = None) -> None:
         step, best_val = ckpt["step"], ckpt.get("best_val", best_val)
         print(f"resumed from {resume} at step {step}")
 
-    fwd = torch.compile(model) if tcfg.compile else model
+    if tcfg.compile_cfc and device.type == "cuda" and "cfc" in cfg.model.layers:
+        ok = enable_compiled_step(device, autocast if autocast is not nullcontext else None)
+        print(f"compiled CfC step: {'on' if ok else 'off (eager fallback)'}")
     log_f = open(out_dir / "log.jsonl", "a", encoding="utf-8")
     mimi_holder: dict = {}
     model.train()
@@ -154,7 +162,7 @@ def train(cfg: Config, resume: str | None = None) -> None:
                 g["lr"] = lr_at(step, tcfg)
             batch = to_device(batch, device)
             with autocast():
-                out = fwd(batch, tcfg)
+                out = model(batch, tcfg)
             loss = out["loss"]
             optimizer.zero_grad(set_to_none=True)
             if scaler is not None:
@@ -215,16 +223,13 @@ def train(cfg: Config, resume: str | None = None) -> None:
     print(f"done: {step} steps, best val loss {best_val:.3f}")
 
 
-def main(argv: list[str] | None = None) -> None:
-    ap = argparse.ArgumentParser(description="Train a Mimi-CfC TTS model")
-    ap.add_argument("--config", required=True)
+def add_args(ap: argparse.ArgumentParser) -> None:
+    ap.add_argument("--config", required=True, help="YAML config, e.g. configs/ljspeech_cfc.yaml")
     ap.add_argument("--resume", default=None, help="path to last.pt to continue from")
     ap.add_argument(
         "overrides", nargs="*", help="e.g. train.lr=1e-4 data.max_frames_per_batch=2000"
     )
-    args = ap.parse_args(argv)
+
+
+def run(args: argparse.Namespace) -> None:
     train(load_config(args.config, args.overrides), args.resume)
-
-
-if __name__ == "__main__":
-    main()

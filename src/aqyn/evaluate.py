@@ -1,10 +1,10 @@
 """Evaluate a checkpoint (or the Mimi ceiling) on a held-out split.
 
     # Ceiling: Mimi encode/decode of the real recordings, no model involved
-    python scripts/evaluate.py --ceiling --data data/ljspeech_tokens --out results/mimi_ceiling
+    uv run aqyn eval --ceiling --data data/ljspeech_tokens --out results/mimi_ceiling
 
     # A trained model
-    python scripts/evaluate.py --ckpt runs/ljspeech_cfc/best.pt --out results/ljspeech_cfc
+    uv run aqyn eval --ckpt runs/ljspeech_cfc/best.pt --out results/ljspeech_cfc
 
 Metrics: WER / CER of an ASR model on the audio, optional UTMOS, time to first frame
 and generation real-time factor. Writes ``results.json`` and per-utterance ``utterances.jsonl``.
@@ -23,9 +23,9 @@ import soxr
 import torch
 from tqdm import tqdm
 
-from mimicfc.checkpoint import load_model
-from mimicfc.codec import FRAME_RATE, SAMPLE_RATE, Mimi, save_audio
-from mimicfc.data import TokenDataset
+from .checkpoint import load_model
+from .codec import FRAME_RATE, SAMPLE_RATE, Mimi, save_audio
+from .data import TokenDataset
 
 
 def norm_for_wer(text: str) -> str:
@@ -71,10 +71,7 @@ def load_utmos(device: str):
     return score
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
-    )
+def add_args(ap: argparse.ArgumentParser) -> None:
     src = ap.add_mutually_exclusive_group(required=True)
     src.add_argument("--ckpt")
     src.add_argument("--ceiling", action="store_true")
@@ -90,7 +87,9 @@ def main() -> None:
     ap.add_argument("--top-k", type=int, default=50)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    args = ap.parse_args()
+
+
+def run(args: argparse.Namespace) -> None:
 
     import jiwer
 
@@ -101,7 +100,7 @@ def main() -> None:
         data_root = args.data or cfg.data.root
     else:
         if not args.data:
-            ap.error("--ceiling needs --data")
+            raise SystemExit("--ceiling needs --data")
         data_root = args.data
     ds = TokenDataset(data_root, args.split)
     if vocab is not None and vocab.symbols != ds.vocab.symbols:
@@ -169,7 +168,3 @@ def main() -> None:
     with open(out / "results.json", "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
     print(json.dumps(summary, indent=2))
-
-
-if __name__ == "__main__":
-    main()

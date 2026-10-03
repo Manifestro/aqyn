@@ -1,6 +1,6 @@
 """Datasets over precomputed Mimi tokens.
 
-Layout written by ``scripts/prepare_ljspeech.py``::
+Layout written by ``aqyn prepare``::
 
     root/
       vocab.json              character vocabulary

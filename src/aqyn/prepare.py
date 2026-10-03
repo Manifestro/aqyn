@@ -1,8 +1,8 @@
 """Download LJSpeech, resample to 24 kHz, and encode it with frozen Mimi.
 
-    python scripts/prepare_ljspeech.py --out data/ljspeech_tokens
+    uv run aqyn prepare --out data/ljspeech_tokens
 
-Writes ``vocab.json``, ``{train,val,test}.jsonl`` and ``{split}_codes.npy`` (see mimicfc/data.py).
+Writes ``vocab.json``, ``{train,val,test}.jsonl`` and ``{split}_codes.npy`` (see aqyn/data.py).
 The split is a fixed random split (seed 1234): 500 test, 100 val, the rest train.
 """
 
@@ -20,8 +20,8 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from mimicfc.codec import Mimi, load_audio
-from mimicfc.text import CharVocab, normalize_text
+from .codec import Mimi, load_audio
+from .text import CharVocab, normalize_text
 
 URL = "https://data.keithito.com/data/speech/LJSpeech-1.1.tar.bz2"
 
@@ -61,10 +61,7 @@ def read_metadata(root: Path) -> list[dict]:
     return items
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
-    )
+def add_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--out", default="data/ljspeech_tokens")
     ap.add_argument(
         "--raw-dir", default="data/raw", help="where LJSpeech is (or will be) downloaded"
@@ -78,7 +75,9 @@ def main() -> None:
     ap.add_argument(
         "--limit", type=int, default=None, help="only use the first N utterances (debugging)"
     )
-    args = ap.parse_args()
+
+
+def run(args: argparse.Namespace) -> None:
 
     root = Path(args.ljspeech_dir) if args.ljspeech_dir else ensure_ljspeech(Path(args.raw_dir))
     items = read_metadata(root)
@@ -120,7 +119,3 @@ def main() -> None:
         np.save(out / f"{split}_codes.npy", np.concatenate(chunks, axis=0))
         hours = offset / 12.5 / 3600
         print(f"{split}: {len(split_items)} utterances, {offset} frames ({hours:.2f} h)")
-
-
-if __name__ == "__main__":
-    main()

@@ -1,6 +1,6 @@
 """Synthesize speech from text with a trained checkpoint.
 
-python scripts/synthesize.py --ckpt runs/ljspeech_cfc/best.pt --text "Hello world." --out hello.wav
+uv run aqyn synth --ckpt runs/ljspeech_cfc/best.pt --text "Hello world." --out hello.wav
 """
 
 from __future__ import annotations
@@ -10,12 +10,11 @@ import time
 
 import torch
 
-from mimicfc.checkpoint import load_model
-from mimicfc.codec import FRAME_RATE, Mimi, save_audio
+from .checkpoint import load_model
+from .codec import FRAME_RATE, Mimi, save_audio
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser()
+def add_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--ckpt", required=True)
     ap.add_argument("--text", required=True)
     ap.add_argument("--out", default="out.wav")
@@ -24,7 +23,9 @@ def main() -> None:
     ap.add_argument("--max-frames", type=int, default=500)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    args = ap.parse_args()
+
+
+def run(args: argparse.Namespace) -> None:
 
     torch.manual_seed(args.seed)
     model, vocab, _, _ = load_model(args.ckpt, args.device)
@@ -55,7 +56,3 @@ def main() -> None:
         f"{args.out}: {dur:.2f} s audio, {len(codes)} frames | first frame {first['t'] * 1000:.0f} ms | "
         f"generation RTF {gen_s / dur:.3f} (Mimi decoding not included)"
     )
-
-
-if __name__ == "__main__":
-    main()
