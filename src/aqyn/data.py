@@ -4,7 +4,8 @@ Layout written by ``aqyn prepare``::
 
     root/
       vocab.json              character vocabulary
-      {split}.jsonl           one line per utterance: id, text, offset, frames, speaker
+      {split}.jsonl           one line per utterance: id, text, offset, frames, speaker,
+                              word_frames (Mimi frame where each word starts)
       {split}_codes.npy       uint16 [total_frames, num_codebooks], utterances concatenated
 """
 
@@ -52,9 +53,17 @@ class TokenDataset(Dataset):
     def __getitem__(self, i: int) -> dict:
         it = self.items[i]
         codes = np.asarray(self.codes[it["offset"] : it["offset"] + it["frames"]], dtype=np.int64)
+        ids, word_starts = self.vocab.encode(it["text"])
+        word_frames = it["word_frames"]
+        if len(word_frames) != len(word_starts):
+            raise ValueError(
+                f"{it['id']}: {len(word_frames)} aligned words, {len(word_starts)} in text"
+            )
         return {
             "id": it["id"],
-            "text": torch.tensor(self.vocab.encode(it["text"]), dtype=torch.long),
+            "text": torch.tensor(ids, dtype=torch.long),
+            "word_starts": torch.tensor(word_starts, dtype=torch.long),
+            "word_frames": torch.tensor(word_frames, dtype=torch.long),
             "codes": torch.from_numpy(codes),
             "speaker": int(it.get("speaker", 0)),
         }
@@ -105,27 +114,26 @@ class FrameBudgetSampler(Sampler[list[int]]):
         return len(self._batches)
 
 
+def _pad(seqs: list[torch.Tensor], value: int) -> torch.Tensor:
+    out = torch.full(
+        (len(seqs), max(len(x) for x in seqs), *seqs[0].shape[1:]), value, dtype=seqs[0].dtype
+    )
+    for i, x in enumerate(seqs):
+        out[i, : len(x)] = x
+    return out
+
+
 def make_collate(pad_id: int):
     def collate(items: list[dict]) -> dict:
-        b = len(items)
-        t_max = max(len(it["text"]) for it in items)
-        f_max = max(len(it["codes"]) for it in items)
-        k = items[0]["codes"].shape[1]
-        text = torch.full((b, t_max), pad_id, dtype=torch.long)
-        codes = torch.zeros((b, f_max, k), dtype=torch.long)
-        text_lens = torch.zeros(b, dtype=torch.long)
-        code_lens = torch.zeros(b, dtype=torch.long)
-        for i, it in enumerate(items):
-            text[i, : len(it["text"])] = it["text"]
-            codes[i, : len(it["codes"])] = it["codes"]
-            text_lens[i] = len(it["text"])
-            code_lens[i] = len(it["codes"])
         return {
             "ids": [it["id"] for it in items],
-            "text": text,
-            "text_lens": text_lens,
-            "codes": codes,
-            "code_lens": code_lens,
+            "text": _pad([it["text"] for it in items], pad_id),
+            "text_lens": torch.tensor([len(it["text"]) for it in items]),
+            "word_starts": _pad([it["word_starts"] for it in items], 0),
+            "word_frames": _pad([it["word_frames"] for it in items], 1 << 30),
+            "num_words": torch.tensor([len(it["word_starts"]) for it in items]),
+            "codes": _pad([it["codes"] for it in items], 0),
+            "code_lens": torch.tensor([len(it["codes"]) for it in items]),
             "speaker": torch.tensor([it["speaker"] for it in items], dtype=torch.long),
         }
 

@@ -30,12 +30,14 @@ def run(args: argparse.Namespace) -> None:
     torch.manual_seed(args.seed)
     model, vocab, _, _ = load_model(args.ckpt, args.device)
     mimi = Mimi(args.device)
-    text = torch.tensor(vocab.encode(args.text), device=args.device)
+    ids, word_starts = vocab.encode(args.text)
+    text = torch.tensor(ids, device=args.device)
+    word_starts = torch.tensor(word_starts, device=args.device)
 
     first = {}
     t0 = time.perf_counter()
 
-    def on_frame(t, _codes):
+    def on_row(t, _row):
         if t == 0:
             if args.device.startswith("cuda"):
                 torch.cuda.synchronize()
@@ -43,10 +45,11 @@ def run(args: argparse.Namespace) -> None:
 
     codes = model.generate(
         text,
+        word_starts,
         max_frames=args.max_frames,
         temperature=args.temperature,
         top_k=args.top_k,
-        on_frame=on_frame,
+        on_row=on_row,
     )
     gen_s = time.perf_counter() - t0
     wav = mimi.decode(codes)

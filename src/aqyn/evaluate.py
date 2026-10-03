@@ -35,7 +35,8 @@ def norm_for_wer(text: str) -> str:
 
 
 class ASR:
-    def __init__(self, model_id: str, device: str):
+    def __init__(self, model_id: str, device: str, language: str = "en"):
+        self.language = language
         from transformers import pipeline
 
         dtype = torch.float16 if device.startswith("cuda") else torch.float32
@@ -47,7 +48,8 @@ class ASR:
         wav16 = soxr.resample(wav, SAMPLE_RATE, 16_000)
         out = self.pipe(
             {"raw": wav16, "sampling_rate": 16_000},
-            generate_kwargs={"language": "en", "task": "transcribe"},
+            generate_kwargs={"language": self.language, "task": "transcribe"},
+            return_timestamps=True,  # also handles outputs longer than 30 s
         )
         return out["text"]
 
@@ -85,6 +87,10 @@ def add_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--utmos", action="store_true")
     ap.add_argument("--temperature", type=float, default=0.8)
     ap.add_argument("--top-k", type=int, default=50)
+    ap.add_argument(
+        "--max-ratio", type=float, default=3.0, help="stop at this multiple of the reference length"
+    )
+    ap.add_argument("--language", default="en", help="ASR language (en, ru, kk, ...)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
 
@@ -111,7 +117,7 @@ def run(args: argparse.Namespace) -> None:
     out = Path(args.out)
     (out / "wavs").mkdir(parents=True, exist_ok=True)
     mimi = Mimi(args.device)
-    asr = ASR(args.asr, args.device)
+    asr = ASR(args.asr, args.device, args.language)
     utmos = load_utmos(args.device) if args.utmos else None
 
     rows = []
@@ -122,18 +128,25 @@ def run(args: argparse.Namespace) -> None:
         if model is None:
             codes = item["codes"]
         else:
-            text = torch.tensor(vocab.encode(ref_text), device=args.device)
+            ids, word_starts = vocab.encode(ref_text)
+            text = torch.tensor(ids, device=args.device)
+            word_starts = torch.tensor(word_starts, device=args.device)
             first = {}
             t0 = time.perf_counter()
 
-            def on_frame(t, _c, first=first, t0=t0):
+            def on_row(t, _r, first=first, t0=t0):
                 if t == 0:
                     if args.device.startswith("cuda"):
                         torch.cuda.synchronize()
                     first["t"] = time.perf_counter() - t0
 
             codes = model.generate(
-                text, temperature=args.temperature, top_k=args.top_k, on_frame=on_frame
+                text,
+                word_starts,
+                max_frames=int(args.max_ratio * len(item["codes"])) + 10,
+                temperature=args.temperature,
+                top_k=args.top_k,
+                on_row=on_row,
             )
             gen_s = time.perf_counter() - t0
             row["first_frame_ms"] = first["t"] * 1000

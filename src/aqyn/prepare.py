@@ -20,8 +20,9 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from .codec import Mimi, load_audio
-from .text import CharVocab, normalize_text
+from .align import CTC_SAMPLE_RATE, CTCAligner
+from .codec import FRAME_RATE, Mimi, load_audio
+from .text import CharVocab, normalize_text, words_of
 
 URL = "https://data.keithito.com/data/speech/LJSpeech-1.1.tar.bz2"
 
@@ -61,6 +62,15 @@ def read_metadata(root: Path) -> list[dict]:
     return items
 
 
+def word_start_frames(spans: list[tuple[float, float]], frames: int) -> list[int]:
+    """Mimi frame in which each word starts (non-decreasing, inside the utterance)."""
+    out, last = [], 0
+    for start, _ in spans:
+        last = min(max(last, int(start * FRAME_RATE)), frames - 1)
+        out.append(last)
+    return out
+
+
 def add_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--out", default="data/ljspeech_tokens")
     ap.add_argument(
@@ -72,6 +82,11 @@ def add_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--num-test", type=int, default=500)
     ap.add_argument("--num-val", type=int, default=100)
+    ap.add_argument(
+        "--align-model",
+        default="facebook/wav2vec2-base-960h",
+        help="character CTC model used for word alignment",
+    )
     ap.add_argument(
         "--limit", type=int, default=None, help="only use the first N utterances (debugging)"
     )
@@ -100,22 +115,33 @@ def run(args: argparse.Namespace) -> None:
     print(f"vocab: {len(vocab)} symbols")
 
     mimi = Mimi(args.device)
+    aligner = CTCAligner(args.align_model, args.device)
     for split, split_items in splits.items():
-        chunks, offset = [], 0
+        chunks, offset, failed = [], 0, 0
         with open(out / f"{split}.jsonl", "w", encoding="utf-8") as f:
             for it in tqdm(split_items, desc=split):
-                wav = load_audio(str(root / "wavs" / f"{it['id']}.wav"))
-                codes = mimi.encode(wav).numpy().astype(np.uint16)
+                path = str(root / "wavs" / f"{it['id']}.wav")
+                words = words_of(it["text"])
+                spans = aligner.align(load_audio(path, CTC_SAMPLE_RATE), CTC_SAMPLE_RATE, words)
+                if spans is None:
+                    failed += 1
+                    continue
+                codes = mimi.encode(load_audio(path)).numpy().astype(np.uint16)
                 rec = {
                     "id": it["id"],
                     "text": it["text"],
                     "offset": offset,
                     "frames": len(codes),
                     "speaker": 0,
+                    "word_frames": word_start_frames(spans, len(codes)),
                 }
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
                 chunks.append(codes)
                 offset += len(codes)
-        np.save(out / f"{split}_codes.npy", np.concatenate(chunks, axis=0))
+        empty = np.zeros((0, mimi.num_codebooks), dtype=np.uint16)
+        np.save(out / f"{split}_codes.npy", np.concatenate(chunks, axis=0) if chunks else empty)
         hours = offset / 12.5 / 3600
-        print(f"{split}: {len(split_items)} utterances, {offset} frames ({hours:.2f} h)")
+        print(
+            f"{split}: {len(chunks)} utterances, {offset} frames ({hours:.2f} h), "
+            f"{failed} dropped (alignment failed)"
+        )

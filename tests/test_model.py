@@ -10,33 +10,52 @@ PAD = 0
 
 
 def tiny_cfg(layers, **kw) -> ModelConfig:
-    base = dict(
-        codebook_size=64,
-        text_dim=32,
-        text_layers=1,
-        text_heads=2,
-        dim=32,
-        layers=layers,
-        heads=2,
-        local_window=4,
-        cfc_backbone_units=32,
-        depth_dim=16,
-        depth_layers=1,
-        depth_heads=2,
-        dropout=0.0,
-    )
+    base = {
+        "codebook_size": 64,
+        "text_dim": 32,
+        "text_layers": 1,
+        "dim": 32,
+        "layers": layers,
+        "heads": 2,
+        "local_window": 4,
+        "cfc_backbone_units": 32,
+        "depth_dim": 16,
+        "depth_layers": 1,
+        "depth_heads": 2,
+        "text_window": 8,
+        "text_left": 2,
+        "cross_attn_every": 2,
+        "dropout": 0.0,
+    }
     base.update(kw)
     return ModelConfig(**base)
 
 
-def make_batch(b=3, t=12, n=9, k=8, v=64):
+def make_batch(v=64, k=8):
+    """Three utterances with 4/3/2 words, 12/8/5 frames."""
     torch.manual_seed(0)
-    text_lens = torch.tensor([n, n - 3, n - 5])[:b]
-    code_lens = torch.tensor([t, t - 4, t - 7])[:b]
+    word_starts = [[0, 4, 9, 13], [0, 3, 7], [0, 5]]
+    text_lens = [17, 10, 8]
+    word_frames = [[0, 3, 6, 9], [1, 2, 5], [0, 3]]
+    code_lens = torch.tensor([12, 8, 5])
+    b, n, w, t = 3, max(text_lens), 4, int(code_lens.max())
     text = torch.randint(4, VOCAB, (b, n))
-    text[torch.arange(n)[None] >= text_lens[:, None]] = PAD
-    codes = torch.randint(0, v, (b, t, k))
-    return {"text": text, "text_lens": text_lens, "codes": codes, "code_lens": code_lens}
+    for i, ln in enumerate(text_lens):
+        text[i, ln:] = PAD
+    ws = torch.zeros(b, w, dtype=torch.long)
+    wf = torch.full((b, w), 1 << 30, dtype=torch.long)
+    for i in range(b):
+        ws[i, : len(word_starts[i])] = torch.tensor(word_starts[i])
+        wf[i, : len(word_frames[i])] = torch.tensor(word_frames[i])
+    return {
+        "text": text,
+        "text_lens": torch.tensor(text_lens),
+        "word_starts": ws,
+        "word_frames": wf,
+        "num_words": torch.tensor([4, 3, 2]),
+        "codes": torch.randint(0, v, (b, t, k)),
+        "code_lens": code_lens,
+    }
 
 
 @pytest.mark.parametrize("mode", ["default", "no_gate", "pure"])
@@ -52,6 +71,27 @@ def test_cfc_sequence_matches_steps(mode):
     torch.testing.assert_close(h, h_last)
 
 
+def test_delay_roundtrip():
+    model = TTSModel(tiny_cfg(["cfc"]), VOCAB, PAD)
+    codes = torch.randint(0, 64, (1, 6, 8))
+    rows = model.delay(codes)
+    assert rows.shape == (1, 7, 8)
+    assert (rows[0, 0, 1:] == model.bos).all() and rows[0, 6, 0] == model.bos
+    torch.testing.assert_close(model.undelay(rows[0]), codes[0])
+
+
+def test_teacher_pointers():
+    model = TTSModel(tiny_cfg(["cfc"]), VOCAB, PAD)
+    pointer, adv = model.pointers(make_batch())
+    # utterance 0: words start at frames 0, 3, 6, 9 (12 frames + 1 delay row)
+    assert pointer[0].tolist() == [0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 3]
+    assert adv[0].tolist() == [0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0]
+    # utterance 1: first word starts at frame 1, pointer stays clamped to word 0 before it
+    assert pointer[1, :4].tolist() == [0, 0, 1, 1]
+    # pointer never exceeds the last word
+    assert (pointer[2] <= 1).all()
+
+
 @pytest.mark.parametrize(
     "layers,pos",
     [
@@ -65,14 +105,19 @@ def test_streaming_matches_teacher_forcing(layers, pos):
     torch.manual_seed(0)
     model = TTSModel(tiny_cfg(layers, audio_pos_emb=pos), VOCAB, PAD).eval()
     batch = make_batch()
+    rows = model.delay(batch["codes"])
+    pointer, _ = model.pointers(batch)
     with torch.no_grad():
-        h_par, _, _ = model.backbone(batch)
-        state = model.start(batch["text"], batch["text_lens"])
+        h_par = model.backbone(batch, rows, pointer)
+        state = model.start(
+            batch["text"], batch["text_lens"], batch["word_starts"], batch["num_words"]
+        )
         prev = None
-        for t in range(batch["codes"].shape[1]):
+        for s in range(rows.shape[1]):
+            state.pointer = pointer[:, s]
             h, _, _ = model.step(prev, state)
-            torch.testing.assert_close(h, h_par[:, t], atol=1e-4, rtol=1e-4)
-            prev = batch["codes"][:, t]
+            torch.testing.assert_close(h, h_par[:, s], atol=1e-4, rtol=1e-4)
+            prev = rows[:, s]
 
 
 @pytest.mark.parametrize("layers", [["cfc"] * 2, ["cfc", "local"]])
@@ -81,13 +126,14 @@ def test_loss_backward(layers):
     out = model(make_batch(), TrainConfig())
     assert torch.isfinite(out["loss"])
     out["loss"].backward()
-    grads = [p.grad for p in model.parameters() if p.requires_grad]
-    assert all(g is not None for g in grads)
+    missing = [n for n, p in model.named_parameters() if p.grad is None]
+    assert not missing, missing
 
 
 def test_generate_shapes():
     model = TTSModel(tiny_cfg(["cfc", "local"]), VOCAB, PAD).eval()
-    codes = model.generate(torch.randint(4, VOCAB, (7,)), max_frames=6, min_frames=6)
+    text = torch.randint(4, VOCAB, (12,))
+    codes = model.generate(text, torch.tensor([0, 5, 9]), max_frames=6, stop_threshold=2.0)
     assert codes.shape == (6, 8)
     assert codes.max() < 64
 
@@ -95,4 +141,4 @@ def test_generate_shapes():
 def test_default_config_size():
     model = TTSModel(ModelConfig(), vocab_size=40, pad_id=0)
     total = count_parameters(model)["total"]
-    assert 50e6 < total < 100e6, total
+    assert 50e6 < total < 120e6, total

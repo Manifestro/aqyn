@@ -23,10 +23,16 @@ class ModelConfig:
     # Mimi
     num_codebooks: int = 8
     codebook_size: int = 2048
-    # Text encoder
+    # Text: character embeddings + local convolutions (no look at the whole text)
     text_dim: int = 384
-    text_layers: int = 4
-    text_heads: int = 6
+    text_layers: int = 3
+    text_kernel: int = 5
+    # Sliding text window read by the backbone at every frame
+    text_window: int = 32  # characters visible per frame
+    text_left: int = 8  # of which this many are before the current word
+    max_advance: int = 3  # the control head moves the pointer by 0..max_advance words per frame
+    # Acoustic codebooks lag the semantic one by this many frames (Moshi-style)
+    acoustic_delay: int = 1
     # Temporal backbone
     dim: int = 512
     # One entry per block: "cfc", "lstm", "attn" (full causal) or "local" (sliding window)
@@ -35,7 +41,7 @@ class ModelConfig:
     ffn_mult: int = 4
     local_window: int = 100  # frames, 100 = 8 s
     audio_pos_emb: bool = False  # sinusoidal positions on audio input (needed for attention-only)
-    cross_attn_every: int = 1  # cross-attention to text in every n-th block
+    cross_attn_every: int = 4  # window cross-attention in every n-th block
     # CfC cell
     cfc_mode: str = "default"  # "default", "no_gate" or "pure"
     cfc_backbone_units: int = 512
@@ -64,8 +70,7 @@ class TrainConfig:
     sample_every: int = 10_000  # synthesize audio samples (needs Mimi); 0 to disable
     codebook_weights: list[float] = field(default_factory=lambda: [1.0] * 8)
     stop_weight: float = 1.0
-    guided_attn_weight: float = 1.0
-    guided_attn_sigma: float = 0.2
+    advance_weight: float = 1.0
     seed: int = 0
     compile_cfc: bool = True  # fuse the CfC step with torch.compile on CUDA (falls back to eager)
 

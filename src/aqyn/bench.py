@@ -33,7 +33,12 @@ def add_args(ap: argparse.ArgumentParser) -> None:
 
 
 def synthetic_batch(b: int, t: int, n: int, vocab: int, cfg, device) -> dict:
+    n_words = n // 6
+    word_frames = torch.arange(n_words, device=device) * (t // n_words)
     return {
+        "word_starts": (torch.arange(n_words, device=device) * 6).expand(b, -1),
+        "word_frames": word_frames.expand(b, -1),
+        "num_words": torch.full((b,), n_words, device=device),
         "text": torch.randint(4, vocab, (b, n), device=device),
         "text_lens": torch.full((b,), n, device=device),
         "codes": torch.randint(0, cfg.codebook_size, (b, t, cfg.num_codebooks), device=device),

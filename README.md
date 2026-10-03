@@ -2,75 +2,66 @@
 
 *Aqyn (акын) is a Kazakh improvising poet-singer who composes and performs in real time.*
 
-**Can Closed-form Continuous-time (CfC / LTC) networks generate streaming speech as Mimi codec tokens?**
+**A two-speed conversational speech model: a fast recurrent "spinal cord" that listens and speaks every 80 ms, and a slow, swappable "cortex" (an LLM) that decides what to say.**
 
-This is an open research project by [Manifestro](https://github.com/Manifestro). We are building and evaluating a small (50–100M parameter) streaming text-to-speech model. A CfC recurrent backbone generates [Mimi](https://huggingface.co/kyutai/mimi) codec tokens frame by frame, and attention supplies the long-range context that CfC cannot hold on its own.
+This is an open research project by [Manifestro](https://github.com/Manifestro). The fast part runs on [Mimi](https://huggingface.co/kyutai/mimi) codec tokens at 12.5 Hz and is built around Closed-form Continuous-time (CfC / LTC) networks, compared against Mamba2, LSTM and Transformer backbones.
 
-> **Status:** Phase 0/1 code is ready (data pipeline, models, training, evaluation). No trained results yet. See the [roadmap](#roadmap).
+> **Status:** Stage 1 (streaming TTS on the spinal cord) is implemented and runs end to end on small data. No trained results yet. English first for fast iteration; Russian and Kazakh data are being collected.
 
 ---
 
-## Motivation
+## Idea
 
-- **Mimi is a natural target for streaming TTS.** It is causal, runs at 12.5 frames per second (80 ms per frame), and uses 8 residual codebooks. Each generated frame can be decoded into audio immediately.
-- **Recurrent generation is cheap to stream.** A CfC cell keeps a fixed-size state: constant memory and compute per frame, no growing KV cache. That suits on-device and low-latency synthesis.
-- **CfC has a limited memory horizon.** Our earlier experiments suggest CfC holds context for only about **8 seconds**. So we do **not** rely on CfC for long-range context. CfC models local dynamics such as articulation, transitions and short-range prosody. Attention and explicit conditioning carry everything longer: the text, the speaker and the style.
-- **As far as we know, this is untested.** We know of no published work on CfC/LTC networks for codec-token speech generation.
+Full-duplex speech models today are one large Transformer that listens, thinks and speaks every 80 ms, so intelligence is paid for in latency. Aqyn splits the model in two:
 
-An open question is whether the ~8 s limit is a limit in **seconds or in recurrent steps**. If it is in steps, Mimi's low frame rate stretches the same number of steps over much more audio. Measuring this is part of the project.
-
-## Design principle: split memory by horizon
-
-| What must be remembered | Horizon | Handled by |
+| | Spinal cord (fast) | Cortex (slow) |
 |---|---|---|
-| Articulation, phone transitions, rhythm | < 1 s | **CfC** |
-| Intra-phrase prosody | 1–8 s | **CfC** + local self-attention |
-| Text still to be spoken | whole utterance | **Cross-attention to text** (stored outside the state) |
-| Speaker identity, style | entire output | **Global conditioning** injected at every step |
-| Long-form (paragraphs) | > 8 s | phrase-level synthesis with carried context |
+| Rate | every Mimi frame, 12.5 Hz | asynchronous, event-driven |
+| Model | small recurrent network (CfC; Mamba2 as fallback) | any pretrained LLM, optionally with LoRA |
+| Does | speaking, prosody, backchannels, pauses, interruptions, turn-taking | reasoning, content, tool calls |
+| Interface | reads a **text queue** through a sliding window and a word pointer | writes text (later: with style tags) into the queue |
 
-## Research questions
+The cortex can be upgraded without retraining the spinal cord. While a tool call runs, the spinal cord keeps the conversation going ("one second, let me check…").
 
-1. **RQ1:** Can a CfC backbone with cross-attention to text produce intelligible, natural speech as Mimi tokens in streaming mode?
-2. **RQ2:** Where exactly does CfC's memory run out in TTS, and is the limit in seconds or in recurrent steps?
-3. **RQ3:** How much do local self-attention and global conditioning compensate for the limited memory?
-4. **RQ4:** Does CfC beat other recurrent backbones (LSTM, Mamba2) with the same parameters, data and training budget, and how does it compare with a causal Transformer in quality, latency and cost?
+Why CfC here: it is small, reactive, keeps constant memory per frame, and comes from control problems. Our earlier experiments suggest CfC holds context for only about **8 seconds**, so the design never asks it to remember anything long: the text comes through the window, the voice through a per-frame speaker embedding.
 
-## Approach
+## Stage 1: streaming TTS on the spinal cord
 
 ```
-text ── text encoder (non-causal) ──────────────┐
-                                                ▼ cross-attention
-prev. Mimi frame ─ 8 codebook embeddings ─ temporal backbone (CfC blocks) ─ depth module ─ 8 tokens ─ Mimi decoder ─ audio
-                                                ▲                            (codebook by codebook)
-speaker / style embedding ──────────────────────┘ (every step)
+text queue ─ char embeddings + local convs ─┐
+                                           ▼  window cross-attention (W chars around the current word)
+prev. row ─ 8 codebook embeddings ─ backbone (CfC / LSTM / attn / local) ─┬─ depth module ─ semantic token + 7 acoustic (1-frame delay) ─ Mimi decoder
+                                                                         ├─ control head: advance the word pointer by 0..3
+                                                                         └─ stop head
 ```
 
-- **Temporal backbone:** CfC blocks advance one Mimi frame (80 ms) per step. Each block has a CfC mixer, cross-attention to the text and an FFN. Phase 2 adds causal local self-attention.
-- **Depth module:** a small network that predicts the 8 codebooks of a frame one after another, conditioned on the backbone output.
-- **Frozen Mimi:** audio is tokenized once. Training uses teacher forcing on the stored tokens.
+- **Text window instead of attention over the whole text.** At every frame the backbone sees a fixed window of characters around the current word, so a step costs O(1). A control head decides when to move to the next word; it is trained from word alignments. This queue is the interface the cortex will write into in Stage 3.
+- **Stress marks.** Text may contain `+` before a stressed vowel (RUAccent convention) for Russian; the model learns to follow it.
+- **Acoustic delay.** Acoustic codebooks lag the semantic one by one frame, as in Moshi.
+- **Word alignment** comes from a character CTC model (wav2vec2 for English; MMS covers Russian and Kazakh) with a Viterbi pass over the transcript.
+- **Generation guards.** Speech can only end on the last word, and the pointer is forced forward after too long on one word.
 
 Details are in [docs/architecture.md](docs/architecture.md).
 
-## Experiment plan
+## Plan
 
-| Phase | Goal |
-|---|---|
-| 0 | Data pipeline, Mimi tokenization, the Mimi resynthesis ceiling, a causal Transformer reference |
-| 1 | **Main model:** CfC + cross-attention to text + global conditioning |
-| 2 | **Hybrid:** add causal local self-attention, tune window size and placement |
-| 3 | **Ablations and controls:** pure CfC, text-in-stream, LSTM / Mamba2 / Transformer backbones, memory-horizon study |
-| 4 | Multi-speaker scaling, other languages, on-device inference |
+| Stage | Goal | Useful on its own as |
+|---|---|---|
+| 1 | Streaming TTS on the spinal cord; CfC vs Mamba2 vs LSTM vs Transformer | a streaming TTS |
+| 2 | Hearing and turn-taking: backchannels, interruptions, yielding the floor (including synthetic dialogues) | a reactive voice front end |
+| 3 | Connect the cortex through the text queue; tool calls during conversation | the full system |
 
-Metrics: intelligibility (ASR-based WER/CER), naturalness (UTMOS, later human MOS), speaker similarity, time to first audio and real-time factor. The full protocol is in [docs/experiments.md](docs/experiments.md).
+Stage 1 metrics: WER through ASR, speaker similarity, stress accuracy on homographs (human listening), 5-minute generations without voice or tempo drift, time to first audio, RTF. Decision rule fixed in advance: if CfC is within 10% of the best backbone on WER and speaker similarity while clearly better on memory and latency, keep it; otherwise use Mamba2. See [docs/experiments.md](docs/experiments.md).
 
 ## Data
 
 | Stage | Dataset | Notes |
 |---|---|---|
-| Feasibility | LJSpeech (~24 h, single speaker) | resampled to 24 kHz |
-| Main | LibriTTS-R (~585 h, multi-speaker) | already 24 kHz |
-| Later | other languages (TBD) | Mimi coverage to be checked first |
+| Fast iteration (now) | LJSpeech (~24 h, English, single speaker) | resampled to 24 kHz |
+| Multi-speaker English | LibriTTS-R (~585 h) | already 24 kHz |
+| Target | Russian and Kazakh as spoken in Kazakhstan | being collected; Mimi coverage checked first |
+
+Dataset licenses are checked one by one before use; non-commercial sets are kept out of anything shipped.
 
 ## Hardware
 
@@ -91,7 +82,7 @@ uv run pytest -q                            # unit tests (CPU, seconds)
 uv run aqyn prepare                         # download LJSpeech (~2.6 GB), encode with Mimi
 uv run aqyn bench --config configs/ljspeech_cfc.yaml   # speed and memory per batch size on your GPU
 uv run aqyn train --config configs/debug.yaml          # smoke test, a few minutes
-uv run aqyn train --config configs/ljspeech_cfc.yaml   # main Phase 1 run
+uv run aqyn train --config configs/ljspeech_cfc.yaml   # main Stage 1 run (CfC)
 
 uv run aqyn synth --ckpt runs/ljspeech_cfc/best.pt --text "Hello, this is a test." --out hello.wav
 uv run aqyn eval --ceiling --data data/ljspeech_tokens --out results/mimi_ceiling
@@ -113,12 +104,12 @@ CfC is a nonlinear recurrence, so it runs one frame at a time (12 blocks × ~100
 
 ### Configs
 
-| Config | Backbone | Params | Phase |
+| Config | Backbone | Params | Role |
 |---|---|---|---|
-| `configs/ljspeech_transformer.yaml` | causal Transformer, 14 blocks | 85.7M | 0 (reference) |
-| `configs/ljspeech_cfc.yaml` | CfC, 12 blocks | 83.6M | 1 (main) |
-| `configs/ljspeech_hybrid.yaml` | CfC + local attention (8 s window), 12 blocks | 81.5M | 2 |
-| `configs/ljspeech_lstm.yaml` | LSTM, 11 blocks | 84.7M | 3 (control) |
+| `configs/ljspeech_transformer.yaml` | causal Transformer, 14 blocks | 70.3M | reference |
+| `configs/ljspeech_cfc.yaml` | CfC, 12 blocks | 69.3M | main |
+| `configs/ljspeech_hybrid.yaml` | CfC + local attention (8 s window), 12 blocks | 67.2M | hybrid |
+| `configs/ljspeech_lstm.yaml` | LSTM, 11 blocks | 71.4M | control |
 | `configs/debug.yaml` | tiny CfC + local attention | 2.2M | smoke test |
 
 All backbones are matched within ±5% of the CfC backbone. Any config value can be overridden from the command line, for example `train.lr=1e-4`.
@@ -129,7 +120,8 @@ All backbones are matched within ±5% of the CfC backbone. Any config value can 
 configs/              experiment configs (one file per run)
 src/aqyn/
   cli.py              `aqyn` command: prepare / train / synth / eval / bench
-  prepare.py          download LJSpeech, resample, encode with Mimi
+  prepare.py          download LJSpeech, resample, encode with Mimi, align words
+  align.py            CTC forced alignment of words (wav2vec2 / MMS)
   train.py            training loop
   synthesize.py       text -> wav, with first-frame latency and RTF
   evaluate.py         ASR WER/CER, UTMOS, latency; also the Mimi ceiling
@@ -138,22 +130,22 @@ src/aqyn/
   text.py             text normalization, character vocabulary
   data.py             token datasets, length-bucketed batching
   models/cfc.py       CfC cell (default / no_gate / pure), compiled step
-  models/blocks.py    CfC, LSTM, attention mixers; cross-attention; streaming step()
-  models/tts.py       text encoder, backbone, depth module, losses, generation
-tests/                streaming-vs-training parity, losses, generation
+  models/blocks.py    CfC, LSTM, attention mixers; text-window cross-attention; streaming step()
+  models/tts.py       text encoder, word pointer, codebook delay, depth module, losses, generation
+tests/                streaming-vs-training parity, pointer targets, delay, losses, generation
 docs/                 architecture, experiment protocol
 ```
 
 ## Roadmap
 
-- [x] Phase 0: Mimi tokenization of LJSpeech, text front end, data loaders
-- [ ] Phase 0: LibriTTS-R preparation
-- [ ] Phase 0: Mimi resynthesis ceiling and causal Transformer reference
-- [x] Phase 1: CfC + cross-attention model and streaming synthesis (code)
-- [ ] Phase 1: first trained models and samples
-- [ ] Phase 2: local self-attention hybrid
-- [ ] Phase 3: memory-horizon study, backbone controls, ablations
-- [ ] Phase 4: multi-speaker scaling, other languages, CPU / mobile export
+- [x] Data: LJSpeech download, Mimi tokenization, CTC word alignment
+- [x] Stage 1 model: text window + word pointer, acoustic delay, control and stop heads
+- [x] Training, synthesis, evaluation (ASR WER/CER, UTMOS, latency, Mimi ceiling), speed benchmark
+- [ ] Stage 1: first trained models and samples on LJSpeech (CfC vs Transformer vs LSTM)
+- [ ] Stage 1: Mamba2 backbone; multi-speaker English (LibriTTS-R) with speaker conditioning
+- [ ] Stage 1: Russian and Kazakh data, stress marks, 5-minute drift test
+- [ ] Stage 2: hearing and turn-taking
+- [ ] Stage 3: cortex through the text queue, tool calls
 - [ ] Technical report with all results and audio samples
 
 ## Contributing

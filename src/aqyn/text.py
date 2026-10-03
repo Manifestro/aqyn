@@ -31,7 +31,8 @@ _ABBREVIATIONS = {
     "ft.": "fort",
 }
 
-_ALLOWED = re.compile(r"[^a-z' .,;:!?\-]")
+# "+" marks the stressed vowel that follows it (RUAccent convention), e.g. "з+амок".
+_ALLOWED = re.compile(r"[^a-z' .,;:!?\-+]")
 _SPACES = re.compile(r"\s+")
 
 
@@ -75,7 +76,25 @@ class CharVocab:
     def pad_id(self) -> int:
         return self.index[PAD]
 
-    def encode(self, text: str) -> list[int]:
-        unk = self.index[UNK]
-        ids = [self.index.get(c, unk) for c in normalize_text(text)]
-        return [self.index[BOS]] + ids + [self.index[EOS]]
+    @property
+    def eos_id(self) -> int:
+        return self.index[EOS]
+
+    def encode(self, text: str) -> tuple[list[int], list[int]]:
+        """Characters of the normalized text followed by EOS, and the index of the
+        first character of every word (words are separated by single spaces)."""
+        unk, space = self.index[UNK], self.index.get(" ", self.index[UNK])
+        ids: list[int] = []
+        word_starts: list[int] = []
+        for i, word in enumerate(words_of(text)):
+            if i:
+                ids.append(space)
+            word_starts.append(len(ids))
+            ids += [self.index.get(c, unk) for c in word]
+        ids.append(self.index[EOS])
+        return ids, word_starts
+
+
+def words_of(text: str) -> list[str]:
+    """Normalized words; punctuation stays attached to its word."""
+    return normalize_text(text).split()

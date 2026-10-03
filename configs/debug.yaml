@@ -6,7 +6,6 @@ data:
 model:
   text_dim: 64
   text_layers: 1
-  text_heads: 2
   dim: 64
   layers: [cfc, local]
   heads: 2

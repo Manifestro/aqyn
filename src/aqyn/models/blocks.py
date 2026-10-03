@@ -121,41 +121,53 @@ class SelfAttnMixer(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Cross-attention to the encoded text.
+# Cross-attention to a sliding window of the text.
 # ---------------------------------------------------------------------------
 
 
-class CrossAttention(nn.Module):
-    def __init__(self, dim: int, heads: int, dropout: float = 0.0):
+class WindowCrossAttention(nn.Module):
+    """Each frame attends only to ``window`` text positions around its current word.
+
+    Keys and values are computed once for the whole text and gathered per frame, so the
+    per-frame cost is fixed no matter how long the text is. A learned bias per head and
+    window offset tells the model where each character sits relative to the current word.
+    """
+
+    def __init__(self, dim: int, heads: int, window: int, dropout: float = 0.0):
         super().__init__()
         self.heads = heads
         self.q = nn.Linear(dim, dim)
         self.kv = nn.Linear(dim, 2 * dim)
         self.out = nn.Linear(dim, dim)
+        self.rel_bias = nn.Parameter(torch.zeros(heads, window))
         self.dropout = nn.Dropout(dropout)
 
     def memory(self, text: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Precompute keys/values of the text once: ``[B, H, N, dh]`` each."""
-        b, n, d = text.shape
+        """Keys/values for the whole text: ``[B, N, D]`` each."""
         k, v = self.kv(text).chunk(2, dim=-1)
-        k = k.view(b, n, self.heads, d // self.heads).transpose(1, 2)
-        v = v.view(b, n, self.heads, d // self.heads).transpose(1, 2)
         return k, v
 
     def forward(
-        self, x: torch.Tensor, mem: tuple[torch.Tensor, torch.Tensor], text_mask: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """``x`` ``[B, T, D]``; ``text_mask`` ``[B, N]`` True for real tokens.
-        Returns the output and head-averaged attention weights ``[B, T, N]``."""
-        b, t, d = x.shape
+        self,
+        x: torch.Tensor,
+        mem: tuple[torch.Tensor, torch.Tensor],
+        win_idx: torch.Tensor,
+        win_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """``x`` ``[B, S, D]``; ``win_idx`` / ``win_mask`` ``[B, S, W]`` (text positions, validity)."""
+        b, s, d = x.shape
+        h, dh, w = self.heads, d // self.heads, win_idx.shape[-1]
         k, v = mem
-        q = self.q(x).view(b, t, self.heads, d // self.heads).transpose(1, 2)
-        scores = q @ k.transpose(-1, -2) / math.sqrt(q.shape[-1])
-        scores = scores.masked_fill(~text_mask[:, None, None, :], float("-inf"))
-        attn = scores.softmax(dim=-1)
-        y = self.dropout(attn) @ v
-        y = self.out(y.transpose(1, 2).reshape(b, t, d))
-        return y, attn.mean(dim=1)
+        flat = win_idx.reshape(b, s * w, 1).expand(-1, -1, d)
+        k = k.gather(1, flat).view(b, s, w, h, dh)
+        v = v.gather(1, flat).view(b, s, w, h, dh)
+        q = self.q(x).view(b, s, h, dh)
+        scores = torch.einsum("bshd,bswhd->bshw", q, k) / math.sqrt(dh)
+        scores = scores + self.rel_bias.to(scores.dtype)
+        scores = scores.masked_fill(~win_mask[:, :, None, :], float("-inf"))
+        attn = self.dropout(scores.softmax(dim=-1))
+        y = torch.einsum("bshw,bswhd->bshd", attn, v).reshape(b, s, d)
+        return self.out(y)
 
 
 # ---------------------------------------------------------------------------
@@ -183,28 +195,29 @@ class Block(nn.Module):
         self.kind = kind
         self.norm_mix = nn.LayerNorm(cfg.dim)
         self.mixer = make_mixer(kind, cfg)
-        self.cross = CrossAttention(cfg.dim, cfg.heads, cfg.dropout) if cross else None
+        self.cross = (
+            WindowCrossAttention(cfg.dim, cfg.heads, cfg.text_window, cfg.dropout)
+            if cross
+            else None
+        )
         self.norm_cross = nn.LayerNorm(cfg.dim) if cross else None
         self.norm_ffn = nn.LayerNorm(cfg.dim)
         self.ffn = FFN(cfg.dim, cfg.ffn_mult, cfg.dropout)
         self.dropout = nn.Dropout(cfg.dropout)
 
-    def forward(self, x, mem, text_mask):
+    def forward(self, x, mem, win_idx, win_mask):
         x = x + self.dropout(self.mixer(self.norm_mix(x)))
-        attn = None
         if self.cross is not None:
-            y, attn = self.cross(self.norm_cross(x), mem, text_mask)
-            x = x + self.dropout(y)
-        x = x + self.dropout(self.ffn(self.norm_ffn(x)))
-        return x, attn
+            x = x + self.dropout(self.cross(self.norm_cross(x), mem, win_idx, win_mask))
+        return x + self.dropout(self.ffn(self.norm_ffn(x)))
 
-    def step(self, x, mem, text_mask, state):
+    def step(self, x, mem, win_idx, win_mask, state):
+        """One frame: ``x`` ``[B, D]``, ``win_idx`` / ``win_mask`` ``[B, W]``."""
         y, state = self.mixer.step(self.norm_mix(x), state)
         x = x + y
-        attn = None
         if self.cross is not None:
-            y, attn = self.cross(self.norm_cross(x).unsqueeze(1), mem, text_mask)
+            y = self.cross(
+                self.norm_cross(x).unsqueeze(1), mem, win_idx[:, None], win_mask[:, None]
+            )
             x = x + y[:, 0]
-            attn = attn[:, 0]
-        x = x + self.ffn(self.norm_ffn(x))
-        return x, state, attn
+        return x + self.ffn(self.norm_ffn(x)), state

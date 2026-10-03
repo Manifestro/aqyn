@@ -78,7 +78,7 @@ def write_samples(model, dataset, out_dir: Path, step: int, device, mimi_holder:
     out_dir.mkdir(parents=True, exist_ok=True)
     for i in range(min(n, len(dataset))):
         item = dataset[i]
-        codes = model.generate(item["text"].to(device))
+        codes = model.generate(item["text"].to(device), item["word_starts"].to(device))
         save_audio(out_dir / f"step{step:07d}_{item['id']}.wav", mimi.decode(codes))
     model.train()
 
@@ -193,7 +193,7 @@ def train(cfg: Config, resume: str | None = None) -> None:
                 )
                 print(
                     f"step {step} loss {rec['loss']:.3f} codes {rec['loss_codes']:.3f} "
-                    f"cb0 {rec['ce_cb0']:.3f} stop {rec['loss_stop']:.3f} guide {rec['loss_guide']:.4f} "
+                    f"cb0 {rec['ce_cb0']:.3f} stop {rec['loss_stop']:.3f} adv {rec['loss_adv']:.3f}/{rec['adv_acc']:.2f} "
                     f"lr {rec['lr']:.2e} {rec['s_per_step']:.2f}s/step"
                 )
                 log_f.write(json.dumps({"split": "train", **rec}) + "\n")

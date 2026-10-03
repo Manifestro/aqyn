@@ -17,42 +17,16 @@ Preprocessing:
 
 Held-out evaluation: a fixed random LJSpeech split (seed 1234: 500 test, 100 val) and LibriTTS-R `test-clean`, plus a fixed set of long texts (paragraphs) for the long-form tests.
 
-## Phases
+## Stage 1 experiments
 
-### Phase 0: pipeline and reference
+1. **Mimi ceiling:** plain Mimi encode/decode of the test set, scored with every metric below.
+2. **Transformer reference** first, to debug the whole pipeline before comparing architectures.
+3. **Backbone comparison** at matched size and data: CfC, Mamba2, LSTM, causal Transformer, CfC + local attention.
+4. **Pointer robustness:** rate of skipped / repeated words; effect of scheduled sampling and inference guards.
+5. **Memory horizon:** metrics by utterance length (0–4, 4–8, 8–16, 16+ s) and 5-minute generations; frame repetition (1×, 2×, 4×, 8×) to tell whether the limit is in seconds or in steps.
+6. **Speed control (optional):** tempo augmentation with CfC time step `dt = 1 / speed` vs scaling the pointer only.
 
-- Tokenization with sanity checks (decode tokens back to audio and listen).
-- **Mimi ceiling:** score plain Mimi encode/decode of the test set with every metric below.
-- **Reference model:** a causal Transformer backbone at the same budget, with the same text encoder, cross-attention and depth module.
-
-### Phase 1: main model
-
-CfC + cross-attention + global conditioning. LJSpeech first, then LibriTTS-R.
-
-### Phase 2: hybrid
-
-- Add causal local self-attention: window of 50 or 100 frames (4 or 8 s).
-- Placement: every 2nd block, every 3rd block, or top blocks only.
-
-### Phase 3: ablations and controls
-
-| Ablation | Values |
-|---|---|
-| Backbone mixer | CfC, LSTM, Mamba2, causal Transformer |
-| Pure CfC (no cross-attention, text in stream) | text lead 0.5 / 1 / 2 s |
-| Depth module | Transformer, CfC/GRU, delay pattern |
-| Codebooks generated | 4, 8 |
-| Text units | phonemes, characters |
-| Alignment aids | none, guided attention loss, monotonic inference |
-
-### Memory-horizon study
-
-The goal is to measure where CfC's context runs out, and whether the limit is in **seconds** or in **recurrent steps**.
-
-1. **Length buckets:** report every metric separately for utterances of 0–4, 4–8, 8–16 and 16+ seconds, and for paragraph-length long-form synthesis. Compare against the LSTM, Mamba2 and Transformer backbones.
-2. **Steps vs seconds:** repeat each Mimi frame 1×, 2×, 4× and 8× (effective step rates of 12.5, 25, 50 and 100 Hz), so the same audio spans more recurrent steps. If quality drops at a fixed number of *steps*, the limit is in steps. If it drops at a fixed number of *seconds*, it is not.
-3. **Probe task:** a synthetic recall task on Mimi token sequences (reproduce information seen `k` steps earlier), to measure the raw memory of each backbone without the TTS objective.
-4. **Speaker drift:** speaker similarity of the first vs the last 4 s of long-form outputs.
+**Decision rule, fixed in advance:** if CfC is within 10% of the best backbone on WER and speaker similarity while clearly better on memory and latency, keep CfC; otherwise use Mamba2.
 
 ## Metrics
 
@@ -60,7 +34,9 @@ The goal is to measure where CfC's context runs out, and whether the limit is in
 |---|---|
 | Intelligibility | WER / CER of a strong ASR model (for example, Whisper large) on the synthesized audio |
 | Naturalness | UTMOS (automatic); human MOS for the final models |
-| Speaker similarity | cosine similarity of speaker embeddings, synthesized vs reference |
+| Speaker similarity | cosine similarity of WavLM / ECAPA speaker embeddings, synthesized vs reference |
+| Stress | accuracy on a homograph set, judged by listeners (ASR barely hears stress) |
+| Long-form drift | voice and tempo stability over 5-minute generations |
 | Robustness | rate of skipped, repeated or truncated words on a hard-sentence set |
 | Time to first audio | from text submission to the first 80 ms of audio |
 | RTF | real-time factor of streaming synthesis on CPU (1 thread) and GPU |

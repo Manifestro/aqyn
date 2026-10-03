@@ -1,4 +1,4 @@
-# Phase 1 main model: CfC backbone + cross-attention to text (~84M params).
+# Stage 1 main model: CfC backbone + text window (~69M params).
 data:
   root: data/ljspeech_tokens
   max_frames_per_batch: 3000   # lower to 2000 if a 12 GB GPU runs out of memory

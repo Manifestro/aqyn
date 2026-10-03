@@ -1,4 +1,4 @@
-# Phase 0 reference: causal Transformer backbone at a matched budget (14 blocks, ~84M params).
+# Reference: causal Transformer backbone at a matched budget (14 blocks, ~70M params).
 data:
   root: data/ljspeech_tokens
   max_frames_per_batch: 3000
