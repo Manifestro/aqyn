@@ -90,7 +90,7 @@ uv run aqyn eval --ckpt runs/ljspeech_cfc/best.pt --out results/ljspeech_cfc --u
 ```
 
 - Any config value can be overridden at the end of the command, e.g. `data.max_frames_per_batch=6000` (use `aqyn bench` to pick it).
-- Resume a stopped run with `--resume runs/<name>/last.pt`.
+- Stop a run with Ctrl-C (or `kill`): it finishes the current step and writes `last.pt`. Resume with `--resume runs/<name>/last.pt` and the same config/overrides; it continues from the same step and the same place in the epoch.
 - `uv run aqyn <command> --help` shows all options.
 
 Training logs go to `runs/<name>/log.jsonl`, checkpoints to `best.pt` / `last.pt`, and audio samples to `runs/<name>/samples/`.

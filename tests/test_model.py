@@ -2,6 +2,7 @@ import pytest
 import torch
 
 from aqyn.config import ModelConfig, TrainConfig
+from aqyn.data import FrameBudgetSampler
 from aqyn.models import TTSModel, count_parameters
 from aqyn.models.cfc import CfC
 
@@ -142,3 +143,26 @@ def test_default_config_size():
     model = TTSModel(ModelConfig(), vocab_size=40, pad_id=0)
     total = count_parameters(model)["total"]
     assert 50e6 < total < 120e6, total
+
+
+class _Lengths:
+    def __init__(self, lengths):
+        self.lengths = lengths
+
+    def __len__(self):
+        return len(self.lengths)
+
+    def frames(self, i):
+        return self.lengths[i]
+
+
+def test_sampler_skip_resumes_mid_epoch():
+    ds = _Lengths([20 + (i * 37) % 180 for i in range(300)])
+    full = FrameBudgetSampler(ds, 1000, seed=3)
+    full.set_epoch(2)
+    resumed = FrameBudgetSampler(ds, 1000, seed=3)
+    resumed.set_epoch(2, skip=5)
+    assert list(resumed) == list(full)[5:]
+    assert len(resumed) == len(full)
+    resumed.set_epoch(3)
+    assert len(list(resumed)) == len(resumed)

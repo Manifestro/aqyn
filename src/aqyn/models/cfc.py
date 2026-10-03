@@ -16,6 +16,7 @@ only the recurrent part runs inside the time loop.
 from __future__ import annotations
 
 import contextlib
+import types
 
 import torch
 import torch.nn.functional as F
@@ -77,9 +78,11 @@ class CfCCell(nn.Module):
     def step(self, x_proj: torch.Tensor, h: torch.Tensor, dt: float = 1.0) -> torch.Tensor:
         backbone = tuple((layer.weight, layer.bias) for layer in self.backbone)
         pure = self.mode == "pure"
+        # Under autocast the learned h0 is float32 while every later state is the autocast
+        # dtype; casting here keeps the compiled step to a single dtype specialisation.
         return _STEP[0](
             x_proj,
-            h,
+            h.to(x_proj.dtype),
             self.rec_proj.weight,
             backbone,
             self.heads.weight,
@@ -88,8 +91,7 @@ class CfCCell(nn.Module):
             self.A if pure else None,
             self.mode,
             dt,
-            self.dropout.p,
-            self.training,
+            self.dropout.p if self.training else 0.0,
         )
 
 
@@ -105,13 +107,16 @@ def cfc_step(
     mode: str,
     dt: float,
     p_drop: float,
-    training: bool,
 ) -> torch.Tensor:
-    """One CfC update as a pure function, so a single compiled graph serves every layer."""
+    """One CfC update as a pure function, so a single compiled graph serves every layer.
+
+    ``p_drop`` is the effective dropout rate: pass 0.0 outside training.
+    """
     z = lecun_tanh(x_proj + F.linear(h, rec_w))
     for w, b in backbone:
         z = lecun_tanh(F.linear(z, w, b))
-    z = F.dropout(z, p_drop, training)
+    if p_drop > 0.0:
+        z = F.dropout(z, p_drop, True)
     if mode == "pure":
         f1 = F.linear(z, heads_w, heads_b)
         return -A * torch.exp(-dt * (w_tau.abs() + f1.abs())) * f1 + A
@@ -130,36 +135,41 @@ _STEP = [cfc_step]
 def enable_compiled_step(device: torch.device, autocast=None) -> bool:
     """Compile the CfC step with ``torch.compile`` so its ~15 small kernels fuse into a few.
 
-    Runs a short self-test (train and inference, with and without autocast). If anything
-    fails, for example no Triton on this platform, it stays on the eager version and
-    returns False.
+    Runs a short self-test (train and inference) through a real ``CfCCell`` under the
+    autocast context the caller will use. If anything fails, for example no Triton on this
+    platform, it stays on the eager version and returns False.
+
+    Dynamo keeps one graph per (grad mode, autocast, layer width) and gives up after
+    ``recompile_limit`` of them per code object, so the self-test compiles a throwaway copy
+    of the function: its graphs do not use up the real step's budget.
     """
+    ctx = autocast if autocast is not None else contextlib.nullcontext
     try:
-        compiled = torch.compile(cfc_step, dynamic=True)
+        probe = types.FunctionType(
+            cfc_step.__code__.replace(co_name="cfc_step_probe"), globals(), "cfc_step_probe"
+        )
+        _STEP[0] = torch.compile(probe, dynamic=True)
         d = 64
-        lin = nn.Linear(d, 4 * d).to(device)
-        rec = torch.randn(d, d, device=device, requires_grad=True)
-        contexts = [contextlib.nullcontext]
-        if autocast is not None:
-            contexts.append(autocast)
-        for ctx in contexts:
-            for b in (3, 5):  # two batch sizes, to settle dynamic shapes
-                x = torch.randn(b, d, device=device)
-                h = torch.zeros(b, d, device=device)
-                with ctx():
-                    y = compiled(
-                        x, h, rec, (), lin.weight, lin.bias, None, None, "default", 1.0, 0.1, True
-                    )
-                y.float().sum().backward()
-                with torch.no_grad(), ctx():
-                    compiled(
-                        x, h, rec, (), lin.weight, lin.bias, None, None, "default", 1.0, 0.0, False
-                    )
+        cell = CfCCell(d, d, backbone_units=2 * d, dropout=0.1).to(device)
+        h0 = torch.zeros(d, device=device, requires_grad=True)
+        for b in (3, 5):  # two batch sizes, to settle dynamic shapes
+            x = torch.randn(b, d, device=device)
+            cell.train()
+            with ctx():
+                h = h0.unsqueeze(0).expand(b, -1)
+                for _ in range(2):
+                    h = cell.step(cell.project_input(x), h)
+            h.float().sum().backward()
+            cell.eval()
+            with torch.no_grad(), ctx():
+                h = h0.unsqueeze(0).expand(b, -1)
+                for _ in range(2):
+                    h = cell.step(cell.project_input(x), h)
     except Exception as e:  # noqa: BLE001 - any compiler failure means "use eager"
         print(f"[cfc] torch.compile unavailable, using eager CfC step: {type(e).__name__}: {e}")
         _STEP[0] = cfc_step
         return False
-    _STEP[0] = compiled
+    _STEP[0] = torch.compile(cfc_step, dynamic=True)
     return True
 
 

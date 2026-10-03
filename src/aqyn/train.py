@@ -11,6 +11,7 @@ import argparse
 import json
 import math
 import random
+import signal
 import time
 from contextlib import nullcontext
 from pathlib import Path
@@ -137,13 +138,16 @@ def train(cfg: Config, resume: str | None = None) -> None:
     )
     autocast, scaler = autocast_for(tcfg.precision, device)
 
-    step, best_val = 0, float("inf")
+    step, best_val, epoch, epoch_step = 0, float("inf"), 0, 0
     if resume:
         ckpt = torch.load(resume, map_location="cpu", weights_only=False)
         model.load_state_dict(ckpt["model"])
         optimizer.load_state_dict(ckpt["optimizer"])
         step, best_val = ckpt["step"], ckpt.get("best_val", best_val)
-        print(f"resumed from {resume} at step {step}")
+        # Checkpoints without a data position come from runs that went through whole epochs.
+        epoch = ckpt.get("epoch", step // max(1, len(sampler)))
+        epoch_step = ckpt.get("epoch_step", step % max(1, len(sampler)))
+        print(f"resumed from {resume} at step {step} (epoch {epoch}, batch {epoch_step})")
 
     if tcfg.compile_cfc and device.type == "cuda" and "cfc" in cfg.model.layers:
         ok = enable_compiled_step(device, autocast if autocast is not nullcontext else None)
@@ -151,10 +155,34 @@ def train(cfg: Config, resume: str | None = None) -> None:
     log_f = open(out_dir / "log.jsonl", "a", encoding="utf-8")
     mimi_holder: dict = {}
     model.train()
-    epoch, t0, frames_seen, running = step // max(1, len(sampler)), time.time(), 0, {}
+    t0, frames_seen, running = time.time(), 0, {}
 
-    while step < tcfg.max_steps:
-        sampler.set_epoch(epoch)
+    def save_last() -> None:
+        save_checkpoint(
+            out_dir / "last.pt",
+            model,
+            optimizer,
+            step,
+            cfg,
+            vocab,
+            best_val=best_val,
+            epoch=epoch,
+            epoch_step=epoch_step,
+        )
+
+    # Ctrl-C / SIGTERM finish the current step, write last.pt and exit; a second one aborts.
+    stop: list[int] = []
+
+    def request_stop(signum, frame) -> None:
+        if stop:
+            raise KeyboardInterrupt
+        stop.append(signum)
+        print("\nstopping after this step (send again to abort without saving)...", flush=True)
+
+    old_handlers = {s: signal.signal(s, request_stop) for s in (signal.SIGINT, signal.SIGTERM)}
+
+    while step < tcfg.max_steps and not stop:
+        sampler.set_epoch(epoch, skip=epoch_step)
         for batch in train_dl:
             if step >= tcfg.max_steps:
                 break
@@ -177,6 +205,7 @@ def train(cfg: Config, resume: str | None = None) -> None:
             else:
                 optimizer.step()
             step += 1
+            epoch_step += 1
             frames_seen += int(batch["code_lens"].sum())
             for k, v in out.items():
                 running[k] = running.get(k, 0.0) + v.detach()
@@ -212,14 +241,22 @@ def train(cfg: Config, resume: str | None = None) -> None:
                     )
 
             if step % tcfg.save_every == 0 or step == tcfg.max_steps:
-                save_checkpoint(
-                    out_dir / "last.pt", model, optimizer, step, cfg, vocab, best_val=best_val
-                )
+                save_last()
 
             if tcfg.sample_every and (step % tcfg.sample_every == 0 or step == tcfg.max_steps):
                 write_samples(model, val_ds, out_dir / "samples", step, device, mimi_holder)
-        epoch += 1
+
+            if stop:
+                break
+        else:
+            epoch, epoch_step = epoch + 1, 0
+    for s, handler in old_handlers.items():
+        signal.signal(s, handler)
     log_f.close()
+    if stop:
+        save_last()
+        print(f"stopped at step {step}; continue with --resume {out_dir / 'last.pt'}")
+        return
     print(f"done: {step} steps, best val loss {best_val:.3f}")
 
 

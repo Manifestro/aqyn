@@ -78,10 +78,13 @@ class FrameBudgetSampler(Sampler[list[int]]):
         self.shuffle = shuffle
         self.seed = seed
         self.epoch = 0
+        self.skip = 0
         self._batches = self._make_batches()
 
-    def set_epoch(self, epoch: int) -> None:
+    def set_epoch(self, epoch: int, skip: int = 0) -> None:
+        """Reshuffle for ``epoch``; ``skip`` drops its first batches (resuming mid-epoch)."""
         self.epoch = epoch
+        self.skip = skip
         self._batches = self._make_batches()
 
     def _make_batches(self) -> list[list[int]]:
@@ -112,7 +115,7 @@ class FrameBudgetSampler(Sampler[list[int]]):
         return batches
 
     def __iter__(self):
-        return iter(self._batches)
+        return iter(self._batches[self.skip :])
 
     def __len__(self) -> int:
         return len(self._batches)
