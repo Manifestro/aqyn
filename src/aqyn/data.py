@@ -93,7 +93,11 @@ class FrameBudgetSampler(Sampler[list[int]]):
         pool = 100 * max(1, self.max_frames // 200)
         batches = []
         for start in range(0, len(idx), pool):
-            chunk = sorted(idx[start : start + pool], key=lambda i: self.lengths[i])
+            # Jitter the sort key so batch composition changes between epochs.
+            jitter = 10.0 if self.shuffle else 0.0
+            chunk = sorted(
+                idx[start : start + pool], key=lambda i: self.lengths[i] + jitter * rng.random()
+            )
             batch, longest = [], 0
             for i in chunk:
                 if batch and max(longest, self.lengths[i]) * (len(batch) + 1) > self.max_frames:
