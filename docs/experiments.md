@@ -85,7 +85,7 @@ What this does and does not show:
 
 In both runs the codes loss on validation keeps falling to the last step and stays at or below the training value, but the stop and advance losses on validation rise from about step 5k (advance: 0.22 -> 0.59 for CfC, while 0.03 on train). Advance accuracy on validation stays at 0.89 the whole time, and the duration of generated speech matches the reference, so the heads become overconfident rather than more wrong.
 
-Consequence: `best.pt`, chosen by the total validation loss, froze at step 8k in both runs and is clearly worse than `last.pt` (11.2% vs 7.8% WER for CfC). Until the selection criterion changes, evaluate `last.pt`.
+Consequence: `best.pt`, chosen by the total validation loss in these runs, froze at step 8k in both and is clearly worse than `last.pt` (11.2% vs 7.8% WER for CfC). Training now selects `best.pt` by validation codes loss instead; in both runs above that would have been the last step.
 
 ### LJSpeech: too small for this model
 
@@ -103,7 +103,7 @@ The run was stopped at step 4k and not evaluated. LJSpeech stays useful for smok
 
 - Second seed and a larger test set before any claim about CfC vs Transformer.
 - LSTM and hybrid (CfC + local attention) controls with the same recipe.
-- Select `best.pt` by validation codes loss; regularize the stop / advance heads.
+- Regularize the stop / advance heads.
 - UTMOS, speaker similarity, CPU RTF and memory.
 
 ## Compute plan

@@ -152,7 +152,8 @@ def train(cfg: Config, resume: str | None = None) -> None:
         ckpt = torch.load(resume, map_location="cpu", weights_only=False)
         model.load_state_dict(ckpt["model"])
         optimizer.load_state_dict(ckpt["optimizer"])
-        step, best_val = ckpt["step"], ckpt.get("best_val", best_val)
+        # Older checkpoints tracked the total loss under "best_val"; that is not comparable.
+        step, best_val = ckpt["step"], ckpt.get("best_val_codes", best_val)
         # Checkpoints without a data position come from runs that went through whole epochs.
         epoch = ckpt.get("epoch", step // max(1, len(sampler)))
         epoch_step = ckpt.get("epoch_step", step % max(1, len(sampler)))
@@ -174,7 +175,7 @@ def train(cfg: Config, resume: str | None = None) -> None:
             step,
             cfg,
             vocab,
-            best_val=best_val,
+            best_val_codes=best_val,
             epoch=epoch,
             epoch_step=epoch_step,
         )
@@ -243,10 +244,12 @@ def train(cfg: Config, resume: str | None = None) -> None:
                 print(f"[val] step {step} loss {val['loss']:.3f} codes {val['loss_codes']:.3f}")
                 log_f.write(json.dumps({"split": "val", "step": step, **val}) + "\n")
                 log_f.flush()
-                if val["loss"] < best_val:
-                    best_val = val["loss"]
+                # best.pt follows the codes loss: the stop / advance losses rise on validation
+                # late in training while the audio keeps improving, and would freeze it early.
+                if val["loss_codes"] < best_val:
+                    best_val = val["loss_codes"]
                     save_checkpoint(
-                        out_dir / "best.pt", model, None, step, cfg, vocab, best_val=best_val
+                        out_dir / "best.pt", model, None, step, cfg, vocab, best_val_codes=best_val
                     )
 
             if step % tcfg.save_every == 0 or step == tcfg.max_steps:
@@ -266,7 +269,7 @@ def train(cfg: Config, resume: str | None = None) -> None:
         save_last()
         print(f"stopped at step {step}; continue with --resume {out_dir / 'last.pt'}")
         return
-    print(f"done: {step} steps, best val loss {best_val:.3f}")
+    print(f"done: {step} steps, best val codes loss {best_val:.3f}")
 
 
 def add_args(ap: argparse.ArgumentParser) -> None:

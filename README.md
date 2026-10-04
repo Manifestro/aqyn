@@ -116,7 +116,7 @@ The second block is the exact recipe behind the numbers above (the Transformer r
 
 - The speaker table is sized from the data, so the same config works for single- and multi-speaker corpora.
 
-Training logs go to `runs/<name>/log.jsonl`, checkpoints to `best.pt` / `last.pt`, and audio samples to `runs/<name>/samples/`. `best.pt` is picked by the total validation loss, which the stop and advance heads dominate late in training; so far `last.pt` has been the better model (see [docs/experiments.md](docs/experiments.md#results)).
+Training logs go to `runs/<name>/log.jsonl`, checkpoints to `best.pt` / `last.pt`, and audio samples to `runs/<name>/samples/`. `best.pt` is the checkpoint with the lowest validation codes loss. (The runs reported above still selected it by the total validation loss, which is why their `best.pt` is an early, worse checkpoint; see [docs/experiments.md](docs/experiments.md#results).)
 
 ### Training speed
 
@@ -168,7 +168,7 @@ docs/                 architecture, experiment protocol
 - [x] Training, synthesis, evaluation (ASR WER/CER, UTMOS, latency, Mimi ceiling), speed benchmark
 - [x] Stage 1: first trained models on multi-speaker English (LibriTTS-R): CfC vs causal Transformer
 - [ ] Stage 1: remaining backbones (LSTM, hybrid, Mamba2), second seed, UTMOS and speaker similarity
-- [ ] Stage 1: overfitting of the stop / advance heads; checkpoint selection by codes loss
+- [ ] Stage 1: overfitting of the stop / advance heads
 - [ ] Stage 1: Russian and Kazakh data, stress marks, 5-minute drift test
 - [ ] Stage 2: hearing and turn-taking
 - [ ] Stage 3: cortex through the text queue, tool calls
