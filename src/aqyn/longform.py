@@ -126,11 +126,11 @@ def run(args: argparse.Namespace) -> None:
         summaries.append(summary)
         rows += k_rows
         print(json.dumps(summary))
-
-    with open(out / "utterances.jsonl", "w", encoding="utf-8") as f:
-        for r in rows:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
-    with open(out / "results.json", "w", encoding="utf-8") as f:
-        json.dump(
-            {"source": str(args.ckpt), "split": args.split, "lengths": summaries}, f, indent=2
-        )
+        # Written after every length, so a failure on the longest streams keeps the rest.
+        with open(out / "utterances.jsonl", "w", encoding="utf-8") as f:
+            for r in rows:
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+        with open(out / "results.json", "w", encoding="utf-8") as f:
+            json.dump(
+                {"source": str(args.ckpt), "split": args.split, "lengths": summaries}, f, indent=2
+            )

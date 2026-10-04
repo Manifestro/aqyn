@@ -86,11 +86,20 @@ class SpeakerSim:
         self.model = WavLMForXVector.from_pretrained(model_id).to(device).eval()
 
     @torch.no_grad()
-    def embed(self, wav: np.ndarray) -> torch.Tensor:
+    def embed(self, wav: np.ndarray, chunk_seconds: float = 20.0) -> torch.Tensor:
+        """Unit x-vector; long audio is embedded in chunks and averaged (WavLM attends
+        over the whole input, so minutes of audio do not fit in memory at once)."""
         wav16 = soxr.resample(wav, SAMPLE_RATE, 16_000)
-        x = self.extractor(wav16, sampling_rate=16_000, return_tensors="pt")
-        emb = self.model(**{k: v.to(self.device) for k, v in x.items()}).embeddings
-        return torch.nn.functional.normalize(emb, dim=-1)[0]
+        size = int(chunk_seconds * 16_000)
+        chunks = [wav16[i : i + size] for i in range(0, len(wav16), size)]
+        if len(chunks) > 1 and len(chunks[-1]) < 16_000:  # drop a tail shorter than 1 s
+            chunks.pop()
+        embs = []
+        for chunk in chunks:
+            x = self.extractor(chunk, sampling_rate=16_000, return_tensors="pt")
+            emb = self.model(**{k: v.to(self.device) for k, v in x.items()}).embeddings
+            embs.append(torch.nn.functional.normalize(emb, dim=-1)[0])
+        return torch.nn.functional.normalize(torch.stack(embs).mean(0), dim=-1)
 
     def __call__(self, a: np.ndarray, b: np.ndarray) -> float:
         return float(self.embed(a) @ self.embed(b))
