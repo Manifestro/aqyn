@@ -6,7 +6,7 @@
 
 This is an open research project by [Manifestro](https://github.com/Manifestro). The fast part runs on [Mimi](https://huggingface.co/kyutai/mimi) codec tokens at 12.5 Hz and is built around Closed-form Continuous-time (CfC / LTC) networks, compared against Mamba2, LSTM and Transformer backbones.
 
-> **Status:** Stage 1 (streaming TTS on the spinal cord) is implemented and runs end to end on small data. No trained results yet. English first for fast iteration; Russian and Kazakh data are being collected.
+> **Status:** Stage 1 (streaming TTS on the spinal cord) is implemented and trained on LibriTTS-R. In the first matched comparison the CfC backbone is on par with a causal Transformer (WER 7.8% vs 8.8%, Mimi ceiling 4.9%; one seed, 100 utterances). English first for fast iteration; Russian and Kazakh data are being collected.
 
 ---
 
@@ -51,14 +51,26 @@ Details are in [docs/architecture.md](docs/architecture.md).
 | 2 | Hearing and turn-taking: backchannels, interruptions, yielding the floor (including synthetic dialogues) | a reactive voice front end |
 | 3 | Connect the cortex through the text queue; tool calls during conversation | the full system |
 
+## First results
+
+Both models: ~70M parameters, LibriTTS-R `train-clean-100` + `train-clean-360` (229 h, 1151 speakers), 20k steps, batches of 26k Mimi frames, one NVIDIA L40. Scores are on 100 held-out test utterances, transcribed with Whisper large-v3-turbo.
+
+| Model | WER | CER | Val codes loss | First frame | RTF (GPU) | Train time |
+|---|---|---|---|---|---|---|
+| Mimi ceiling (encode/decode only) | 4.9% | 2.2% | — | — | — | — |
+| CfC, 12 blocks | 7.8% | 3.4% | 4.21 | 29 ms | 0.27 | 8.0 h |
+| Causal Transformer, 14 blocks | 8.8% | 4.1% | 4.17 | 29 ms | 0.27 | 3.3 h |
+
+One seed and 100 utterances: the WER gap is within noise, so read this as "CfC is not worse", not "CfC is better". Naturalness (UTMOS) and speaker similarity are not measured yet. Full numbers and what went wrong on the way are in [docs/experiments.md](docs/experiments.md#results).
+
 Stage 1 metrics: WER through ASR, speaker similarity, stress accuracy on homographs (human listening), 5-minute generations without voice or tempo drift, time to first audio, RTF. Decision rule fixed in advance: if CfC is within 10% of the best backbone on WER and speaker similarity while clearly better on memory and latency, keep it; otherwise use Mamba2. See [docs/experiments.md](docs/experiments.md).
 
 ## Data
 
 | Stage | Dataset | Notes |
 |---|---|---|
-| Fast iteration (now) | LJSpeech (~24 h, English, single speaker) | resampled to 24 kHz |
-| Multi-speaker English | LibriTTS-R (~585 h) | already 24 kHz |
+| Smoke tests | LJSpeech (~24 h, English, single speaker) | resampled to 24 kHz; a 70M model overfits it within ~3k steps |
+| Multi-speaker English (now) | LibriTTS-R, `train-clean-100` + `train-clean-360` (~229 h after filtering, 1151 speakers) | already 24 kHz; `train-other-500` not used yet |
 | Target | Russian and Kazakh as spoken in Kazakhstan | being collected; Mimi coverage checked first |
 
 Dataset licenses are checked one by one before use; non-commercial sets are kept out of anything shipped.
@@ -80,20 +92,31 @@ uv sync                                     # create .venv and install everythin
 uv run pytest -q                            # unit tests (CPU, seconds)
 
 uv run aqyn prepare                         # download LJSpeech (~2.6 GB), encode with Mimi
-uv run aqyn bench --config configs/ljspeech_cfc.yaml   # speed and memory per batch size on your GPU
 uv run aqyn train --config configs/debug.yaml          # smoke test, a few minutes
-uv run aqyn train --config configs/ljspeech_cfc.yaml   # main Stage 1 run (CfC)
-
-uv run aqyn synth --ckpt runs/ljspeech_cfc/best.pt --text "Hello, this is a test." --out hello.wav
-uv run aqyn eval --ceiling --data data/ljspeech_tokens --out results/mimi_ceiling
-uv run aqyn eval --ckpt runs/ljspeech_cfc/best.pt --out results/ljspeech_cfc --utmos
 ```
+
+The main runs use LibriTTS-R (~37 GB to download, about an hour of tokenization on one GPU):
+
+```bash
+uv run aqyn prepare --dataset libritts_r --out data/libritts_r_tokens --num-val 300
+uv run aqyn bench --config configs/libritts_r_cfc.yaml   # speed and memory per batch size on your GPU
+uv run aqyn train --config configs/libritts_r_cfc.yaml data.max_frames_per_batch=26000 \
+    train.max_steps=20000 train.warmup_steps=1000 train.eval_every=1000 train.save_every=500 train.sample_every=2000
+
+uv run aqyn synth --ckpt runs/libritts_r_cfc/last.pt --speaker 0 --text "Hello, this is a test." --out hello.wav
+uv run aqyn eval --ceiling --data data/libritts_r_tokens --out results/ceiling --num 100
+uv run aqyn eval --ckpt runs/libritts_r_cfc/last.pt --out results/cfc_last --num 100
+```
+
+The second block is the exact recipe behind the numbers above (the Transformer run only swaps the config); 26k frames per batch needs a 48 GB GPU.
 
 - Any config value can be overridden at the end of the command, e.g. `data.max_frames_per_batch=6000` (use `aqyn bench` to pick it).
 - Stop a run with Ctrl-C (or `kill`): it finishes the current step and writes `last.pt`. Resume with `--resume runs/<name>/last.pt` and the same config/overrides; it continues from the same step and the same place in the epoch.
 - `uv run aqyn <command> --help` shows all options.
 
-Training logs go to `runs/<name>/log.jsonl`, checkpoints to `best.pt` / `last.pt`, and audio samples to `runs/<name>/samples/`.
+- The speaker table is sized from the data, so the same config works for single- and multi-speaker corpora.
+
+Training logs go to `runs/<name>/log.jsonl`, checkpoints to `best.pt` / `last.pt`, and audio samples to `runs/<name>/samples/`. `best.pt` is picked by the total validation loss, which the stop and advance heads dominate late in training; so far `last.pt` has been the better model (see [docs/experiments.md](docs/experiments.md#results)).
 
 ### Training speed
 
@@ -106,8 +129,10 @@ CfC is a nonlinear recurrence, so it runs one frame at a time (12 blocks × ~100
 
 | Config | Backbone | Params | Role |
 |---|---|---|---|
-| `configs/ljspeech_transformer.yaml` | causal Transformer, 14 blocks | 70.3M | reference |
-| `configs/ljspeech_cfc.yaml` | CfC, 12 blocks | 69.3M | main |
+| `configs/libritts_r_cfc.yaml` | CfC, 12 blocks | 69.9M | main |
+| `configs/libritts_r_transformer.yaml` | causal Transformer, 14 blocks | 70.9M | reference |
+| `configs/ljspeech_cfc.yaml` | CfC, 12 blocks | 69.3M | single speaker |
+| `configs/ljspeech_transformer.yaml` | causal Transformer, 14 blocks | 70.3M | single speaker |
 | `configs/ljspeech_hybrid.yaml` | CfC + local attention (8 s window), 12 blocks | 67.2M | hybrid |
 | `configs/ljspeech_lstm.yaml` | LSTM, 11 blocks | 71.4M | control |
 | `configs/debug.yaml` | tiny CfC + local attention | 2.2M | smoke test |
@@ -120,9 +145,9 @@ All backbones are matched within ±5% of the CfC backbone. Any config value can 
 configs/              experiment configs (one file per run)
 src/aqyn/
   cli.py              `aqyn` command: prepare / train / synth / eval / bench
-  prepare.py          download LJSpeech, resample, encode with Mimi, align words
+  prepare.py          download LJSpeech / LibriTTS-R, resample, encode with Mimi, align words
   align.py            CTC forced alignment of words (wav2vec2 / MMS)
-  train.py            training loop
+  train.py            training loop (graceful stop, exact resume)
   synthesize.py       text -> wav, with first-frame latency and RTF
   evaluate.py         ASR WER/CER, UTMOS, latency; also the Mimi ceiling
   bench.py            speed and memory benchmark on synthetic batches
@@ -138,11 +163,12 @@ docs/                 architecture, experiment protocol
 
 ## Roadmap
 
-- [x] Data: LJSpeech download, Mimi tokenization, CTC word alignment
+- [x] Data: LJSpeech and LibriTTS-R download, Mimi tokenization, CTC word alignment
 - [x] Stage 1 model: text window + word pointer, acoustic delay, control and stop heads
 - [x] Training, synthesis, evaluation (ASR WER/CER, UTMOS, latency, Mimi ceiling), speed benchmark
-- [ ] Stage 1: first trained models and samples on LJSpeech (CfC vs Transformer vs LSTM)
-- [ ] Stage 1: Mamba2 backbone; multi-speaker English (LibriTTS-R) with speaker conditioning
+- [x] Stage 1: first trained models on multi-speaker English (LibriTTS-R): CfC vs causal Transformer
+- [ ] Stage 1: remaining backbones (LSTM, hybrid, Mamba2), second seed, UTMOS and speaker similarity
+- [ ] Stage 1: overfitting of the stop / advance heads; checkpoint selection by codes loss
 - [ ] Stage 1: Russian and Kazakh data, stress marks, 5-minute drift test
 - [ ] Stage 2: hearing and turn-taking
 - [ ] Stage 3: cortex through the text queue, tool calls
