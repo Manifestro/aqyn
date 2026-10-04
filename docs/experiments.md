@@ -99,12 +99,43 @@ The 69M CfC model overfits LJSpeech within a few thousand steps at this batch si
 
 The run was stopped at step 4k and not evaluated. LJSpeech stays useful for smoke tests only.
 
+### Streaming cost (preliminary)
+
+`aqyn latency`, one CPU thread on an Apple M1, random weights (cost does not depend on them), fp32. The depth module (8 codebooks per frame) is the same for every backbone and takes 9.4 ms per frame.
+
+| Backbone | Backbone ms / frame, 10 s stream | 60 s stream | Last 50 frames at 60 s | State after 60 s | Total RTF at 60 s |
+|---|---|---|---|---|---|
+| CfC | 8.5 | 8.5 | 8.4 | 24 KB | 0.22 |
+| LSTM | 8.8 | 8.9 | 8.7 | 44 KB | 0.23 |
+| CfC + local attention | 8.3 | 8.4 | 8.3 | 1.6 MB | 0.22 |
+| Causal Transformer | 9.0 | 10.2 | 11.7 | 41 MB | 0.25 |
+
+On short streams the backbones cost the same; the Transformer's key/value cache grows by about 0.7 MB per second of audio and its step slows down with it. Whether that matters is a question about long sessions and many parallel streams, which is what the comparison below measures (5-minute streams, server CPU and GPU).
+
 ### Open items from these runs
 
 - Second seed and a larger test set before any claim about CfC vs Transformer.
-- LSTM and hybrid (CfC + local attention) controls with the same recipe.
 - Regularize the stop / advance heads.
-- UTMOS, speaker similarity, CPU RTF and memory.
+
+## Comparison protocol (next runs)
+
+The question: is CfC better than the alternatives at anything, or only not worse? One command per backbone (`scripts/pod/queue.sh`), the same recipe as above, with `best.pt` now selected by validation codes loss.
+
+| What | How | Decides |
+|---|---|---|
+| Quality on the test set | all 492 test utterances x 2 sampling seeds: WER / CER, UTMOS, speaker similarity (WavLM x-vector cosine to the Mimi-reconstructed reference) | is any backbone better on quality; paired bootstrap against the Transformer |
+| Long form | paragraphs of 1, 2, 4, 8, 16 and 48 joined test sentences (about 6 s to 5 min), one stream each: WER, duration ratio, runs that hit the frame limit, voice drift | does a backbone fall apart beyond the 20 s it was trained on |
+| Streaming cost | `aqyn latency` on one CPU thread and on the GPU, streams of 10 s, 1 min, 5 min: ms per frame, RTF, state size, peak memory | the "clearly better on memory and latency" half of the decision rule |
+| Training cost | s / step and GPU-hours from the logs | what the choice costs |
+| Seeds | a second training seed for CfC and Transformer if the first pass is close | whether a gap survives a re-run |
+
+Backbones: causal Transformer (reference), CfC, LSTM (control: is it CfC or just "any recurrent net with the text window"), CfC + local attention. Mamba2 is not implemented yet.
+
+Reading the outcome, fixed in advance:
+
+- CfC wins if quality is within the interval of the best backbone **and** it is clearly ahead on long form or on streaming cost.
+- If LSTM matches CfC everywhere, the result is about the text window and the recurrent state, not about CfC; LSTM is then the simpler choice.
+- If the Transformer is as good on long form and the cost gap does not matter at the target stream length, CfC only costs training time (2.3x per step) and is dropped.
 
 ## Compute plan
 

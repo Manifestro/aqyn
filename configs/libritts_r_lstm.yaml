@@ -1,0 +1,11 @@
+# Control for libritts_r_cfc: LSTM backbone at a matched budget (11 blocks).
+# Same data, batch and schedule as the CfC run.
+data:
+  root: data/libritts_r_tokens
+  max_frames_per_batch: 3000
+  num_workers: 4
+model:
+  layers: [lstm, lstm, lstm, lstm, lstm, lstm, lstm, lstm, lstm, lstm, lstm]
+train:
+  out_dir: runs/libritts_r_lstm
+  max_steps: 100000

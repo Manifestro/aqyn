@@ -16,6 +16,10 @@ dependencies = [
     "jiwer",
 ]
 
+[project.optional-dependencies]
+# UTMOS (aqyn eval --utmos) loads through torch.hub and needs torchaudio.
+eval = ["torchaudio"]
+
 [project.scripts]
 aqyn = "aqyn.cli:main"
 
@@ -33,6 +37,7 @@ packages = ["src/aqyn"]
 # macOS gets the regular CPU/MPS build from PyPI.
 [tool.uv.sources]
 torch = [{ index = "pytorch-cu128", marker = "sys_platform == 'linux' or sys_platform == 'win32'" }]
+torchaudio = [{ index = "pytorch-cu128", marker = "sys_platform == 'linux' or sys_platform == 'win32'" }]
 
 [[tool.uv.index]]
 name = "pytorch-cu128"

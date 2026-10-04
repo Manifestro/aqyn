@@ -6,8 +6,10 @@
     # A trained model
     uv run aqyn eval --ckpt runs/ljspeech_cfc/best.pt --out results/ljspeech_cfc
 
-Metrics: WER / CER of an ASR model on the audio, optional UTMOS, time to first frame
-and generation real-time factor. Writes ``results.json`` and per-utterance ``utterances.jsonl``.
+Metrics: WER / CER of an ASR model on the audio, optional UTMOS (``--utmos``, needs the
+``eval`` extra) and speaker similarity (``--spk-sim``: cosine of WavLM x-vectors between the
+generated audio and the Mimi reconstruction of the reference), time to first frame and
+generation real-time factor. Writes ``results.json`` and per-utterance ``utterances.jsonl``.
 """
 
 from __future__ import annotations
@@ -73,6 +75,49 @@ def load_utmos(device: str):
     return score
 
 
+class SpeakerSim:
+    """Cosine similarity of WavLM x-vectors (speaker verification embeddings)."""
+
+    def __init__(self, device: str, model_id: str = "microsoft/wavlm-base-plus-sv"):
+        from transformers import AutoFeatureExtractor, WavLMForXVector
+
+        self.device = device
+        self.extractor = AutoFeatureExtractor.from_pretrained(model_id)
+        self.model = WavLMForXVector.from_pretrained(model_id).to(device).eval()
+
+    @torch.no_grad()
+    def embed(self, wav: np.ndarray) -> torch.Tensor:
+        wav16 = soxr.resample(wav, SAMPLE_RATE, 16_000)
+        x = self.extractor(wav16, sampling_rate=16_000, return_tensors="pt")
+        emb = self.model(**{k: v.to(self.device) for k, v in x.items()}).embeddings
+        return torch.nn.functional.normalize(emb, dim=-1)[0]
+
+    def __call__(self, a: np.ndarray, b: np.ndarray) -> float:
+        return float(self.embed(a) @ self.embed(b))
+
+
+def timed_generate(model, vocab, text: str, speaker: int, device: str, **kwargs):
+    """Generate ``text``; returns ``(codes, ms to the first frame, total seconds)``."""
+    ids, word_starts = vocab.encode(text)
+    first = {}
+    t0 = time.perf_counter()
+
+    def on_row(t, _row):
+        if t == 0:
+            if device.startswith("cuda"):
+                torch.cuda.synchronize()
+            first["t"] = time.perf_counter() - t0
+
+    codes = model.generate(
+        torch.tensor(ids, device=device),
+        torch.tensor(word_starts, device=device),
+        speaker=torch.tensor([speaker], device=device),
+        on_row=on_row,
+        **kwargs,
+    )
+    return codes, first["t"] * 1000, time.perf_counter() - t0
+
+
 def add_args(ap: argparse.ArgumentParser) -> None:
     src = ap.add_mutually_exclusive_group(required=True)
     src.add_argument("--ckpt")
@@ -85,6 +130,7 @@ def add_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--out", required=True)
     ap.add_argument("--asr", default="openai/whisper-large-v3-turbo")
     ap.add_argument("--utmos", action="store_true")
+    ap.add_argument("--spk-sim", action="store_true", help="speaker similarity to the reference")
     ap.add_argument("--temperature", type=float, default=0.8)
     ap.add_argument("--top-k", type=int, default=50)
     ap.add_argument(
@@ -119,6 +165,7 @@ def run(args: argparse.Namespace) -> None:
     mimi = Mimi(args.device)
     asr = ASR(args.asr, args.device, args.language)
     utmos = load_utmos(args.device) if args.utmos else None
+    spk_sim = SpeakerSim(args.device) if args.spk_sim and model is not None else None
 
     rows = []
     for i in tqdm(range(min(args.num, len(ds))), desc="eval"):
@@ -128,29 +175,16 @@ def run(args: argparse.Namespace) -> None:
         if model is None:
             codes = item["codes"]
         else:
-            ids, word_starts = vocab.encode(ref_text)
-            text = torch.tensor(ids, device=args.device)
-            word_starts = torch.tensor(word_starts, device=args.device)
-            first = {}
-            t0 = time.perf_counter()
-
-            def on_row(t, _r, first=first, t0=t0):
-                if t == 0:
-                    if args.device.startswith("cuda"):
-                        torch.cuda.synchronize()
-                    first["t"] = time.perf_counter() - t0
-
-            codes = model.generate(
-                text,
-                word_starts,
-                speaker=torch.tensor([item["speaker"]], device=args.device),
+            codes, row["first_frame_ms"], gen_s = timed_generate(
+                model,
+                vocab,
+                ref_text,
+                item["speaker"],
+                args.device,
                 max_frames=int(args.max_ratio * len(item["codes"])) + 10,
                 temperature=args.temperature,
                 top_k=args.top_k,
-                on_row=on_row,
             )
-            gen_s = time.perf_counter() - t0
-            row["first_frame_ms"] = first["t"] * 1000
             row["rtf"] = gen_s / (len(codes) / FRAME_RATE)
         wav = mimi.decode(codes).numpy()
         save_audio(out / "wavs" / f"{item['id']}.wav", wav)
@@ -159,6 +193,8 @@ def run(args: argparse.Namespace) -> None:
         row["hyp"] = asr(wav)
         if utmos is not None:
             row["utmos"] = utmos(wav)
+        if spk_sim is not None:
+            row["spk_sim"] = spk_sim(wav, mimi.decode(item["codes"]).numpy())
         rows.append(row)
 
     refs = [norm_for_wer(r["ref"]) for r in rows]
@@ -171,7 +207,7 @@ def run(args: argparse.Namespace) -> None:
         "cer": jiwer.cer(refs, hyps),
         "duration_ratio": float(np.mean([r["seconds"] / r["ref_seconds"] for r in rows])),
     }
-    for key in ("utmos", "first_frame_ms", "rtf"):
+    for key in ("utmos", "spk_sim", "first_frame_ms", "rtf"):
         vals = [r[key] for r in rows if key in r]
         if vals:
             summary[key] = float(np.mean(vals))

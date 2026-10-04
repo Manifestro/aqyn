@@ -88,7 +88,7 @@ Dataset licenses are checked one by one before use; non-commercial sets are kept
 Requires [uv](https://docs.astral.sh/uv/) and an NVIDIA GPU (an RTX 3060 with 12 GB is enough for LJSpeech). On Linux and Windows, uv installs the CUDA 12.8 build of PyTorch automatically.
 
 ```bash
-uv sync                                     # create .venv and install everything
+uv sync                                     # create .venv and install everything (add --extra eval for UTMOS)
 uv run pytest -q                            # unit tests (CPU, seconds)
 
 uv run aqyn prepare                         # download LJSpeech (~2.6 GB), encode with Mimi
@@ -109,6 +109,24 @@ uv run aqyn eval --ckpt runs/libritts_r_cfc/last.pt --out results/cfc_last --num
 ```
 
 The second block is the exact recipe behind the numbers above (the Transformer run only swaps the config); 26k frames per batch needs a 48 GB GPU.
+
+### Reproducing the backbone comparison
+
+`scripts/pod/` runs the whole comparison on a rented GPU, detached from the terminal:
+
+```bash
+git clone https://github.com/Manifestro/aqyn.git /workspace/aqyn
+bash /workspace/aqyn/scripts/pod/setup.sh                    # environment, LibriTTS-R, tokens (~1.5 h)
+/workspace/aqyn/scripts/pod/queue.sh transformer:0 cfc:0 lstm:0 hybrid:0   # backbone:seed, one after another
+tail -f /workspace/aqyn/runs/queue.log
+```
+
+Each run is trained with the fixed recipe and then evaluated: the whole test set with two sampling seeds (WER, UTMOS, speaker similarity), the long-form test and the streaming cost. `results/summary.md` is rebuilt after every run (`scripts/summarize.py`). The same tools work by hand:
+
+```bash
+uv run aqyn latency --config configs/libritts_r_cfc.yaml --device cpu --threads 1   # ms per frame, state size
+uv run aqyn longform --ckpt runs/libritts_r_cfc_s0/last.pt --out results/cfc_s0/longform
+```
 
 - Any config value can be overridden at the end of the command, e.g. `data.max_frames_per_batch=6000` (use `aqyn bench` to pick it).
 - Stop a run with Ctrl-C (or `kill`): it finishes the current step and writes `last.pt`. Resume with `--resume runs/<name>/last.pt` and the same config/overrides; it continues from the same step and the same place in the epoch.
@@ -131,6 +149,8 @@ CfC is a nonlinear recurrence, so it runs one frame at a time (12 blocks × ~100
 |---|---|---|---|
 | `configs/libritts_r_cfc.yaml` | CfC, 12 blocks | 69.9M | main |
 | `configs/libritts_r_transformer.yaml` | causal Transformer, 14 blocks | 70.9M | reference |
+| `configs/libritts_r_lstm.yaml` | LSTM, 11 blocks | 72.0M | control |
+| `configs/libritts_r_hybrid.yaml` | CfC + local attention (8 s window), 12 blocks | 67.8M | hybrid |
 | `configs/ljspeech_cfc.yaml` | CfC, 12 blocks | 69.3M | single speaker |
 | `configs/ljspeech_transformer.yaml` | causal Transformer, 14 blocks | 70.3M | single speaker |
 | `configs/ljspeech_hybrid.yaml` | CfC + local attention (8 s window), 12 blocks | 67.2M | hybrid |
@@ -144,19 +164,23 @@ All backbones are matched within ±5% of the CfC backbone. Any config value can 
 ```
 configs/              experiment configs (one file per run)
 src/aqyn/
-  cli.py              `aqyn` command: prepare / train / synth / eval / bench
+  cli.py              `aqyn` command: prepare / train / synth / eval / longform / latency / bench
   prepare.py          download LJSpeech / LibriTTS-R, resample, encode with Mimi, align words
   align.py            CTC forced alignment of words (wav2vec2 / MMS)
   train.py            training loop (graceful stop, exact resume)
   synthesize.py       text -> wav, with first-frame latency and RTF
   evaluate.py         ASR WER/CER, UTMOS, latency; also the Mimi ceiling
   bench.py            speed and memory benchmark on synthetic batches
+  latency.py          streaming cost: time per frame, memory, per-stream state size
+  longform.py         WER and voice drift on paragraphs longer than the training clips
   codec.py            frozen Mimi wrapper
   text.py             text normalization, character vocabulary
   data.py             token datasets, length-bucketed batching
   models/cfc.py       CfC cell (default / no_gate / pure), compiled step
   models/blocks.py    CfC, LSTM, attention mixers; text-window cross-attention; streaming step()
   models/tts.py       text encoder, word pointer, codebook delay, depth module, losses, generation
+scripts/pod/          setup, training, evaluation and a job queue for a rented GPU
+scripts/summarize.py  one Markdown report from everything under results/ and runs/
 tests/                streaming-vs-training parity, pointer targets, delay, losses, generation
 docs/                 architecture, experiment protocol
 ```

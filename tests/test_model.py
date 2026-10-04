@@ -3,6 +3,8 @@ import torch
 
 from aqyn.config import ModelConfig, TrainConfig
 from aqyn.data import FrameBudgetSampler
+from aqyn.latency import VOCAB as LAT_VOCAB
+from aqyn.latency import stream
 from aqyn.models import TTSModel, count_parameters
 from aqyn.models.cfc import CfC
 
@@ -166,3 +168,13 @@ def test_sampler_skip_resumes_mid_epoch():
     assert len(resumed) == len(full)
     resumed.set_epoch(3)
     assert len(list(resumed)) == len(resumed)
+
+
+def test_stream_state_size():
+    """A recurrent backbone keeps a fixed state; attention grows with the stream."""
+    sizes = {}
+    for kind in ("cfc", "attn"):
+        model = TTSModel(tiny_cfg([kind, kind], audio_pos_emb=kind == "attn"), LAT_VOCAB, 0).eval()
+        sizes[kind] = [stream(model, n, torch.device("cpu"))["state_bytes"] for n in (10, 30)]
+    assert sizes["cfc"][0] == sizes["cfc"][1] > 0
+    assert sizes["attn"][1] == 3 * sizes["attn"][0]

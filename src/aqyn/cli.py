@@ -11,6 +11,8 @@ COMMANDS = {
     "synth": ("synthesize", "synthesize speech from text"),
     "eval": ("evaluate", "evaluate a checkpoint or the Mimi ceiling"),
     "bench": ("bench", "measure training speed and memory on this GPU"),
+    "latency": ("latency", "streaming cost: time per frame, memory, state size"),
+    "longform": ("longform", "WER and voice stability on long paragraphs"),
 }
 
 
