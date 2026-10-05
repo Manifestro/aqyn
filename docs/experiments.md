@@ -53,11 +53,70 @@ Held-out evaluation: a fixed random split over utterances (seed 1234: 500 test, 
 
 ## Results
 
-All runs so far: one seed, one NVIDIA L40 (48 GB), bf16, AdamW, lr 3e-4 with 1k warm-up and cosine decay, 26k Mimi frames per batch, 20k steps. Evaluation: 100 test utterances, sampling at temperature 0.8 / top-k 50, ASR with Whisper large-v3-turbo. RTF excludes Mimi decoding.
+Training for all runs: one seed, bf16, AdamW, lr 3e-4 with 1k warm-up and cosine decay, 26k Mimi frames per batch, 20k steps on one 48 GB GPU (the CfC run on an NVIDIA L40, the Transformer run of the full comparison on an A40; an earlier Transformer run on the L40 reached the same validation losses). Sampling at temperature 0.8 / top-k 50, ASR with Whisper large-v3-turbo. Generation RTF excludes Mimi decoding.
 
-### LibriTTS-R: CfC vs causal Transformer
+Data: LibriTTS-R `train-clean-100` + `train-clean-360`, 146,016 training utterances (229.4 h, 1151 speakers) after dropping clips shorter than 0.5 s or longer than 20 s; 294 val and 492 test utterances from the same speakers.
 
-Data: `train-clean-100` + `train-clean-360`, 146,016 training utterances (229.4 h, 1151 speakers) after dropping clips shorter than 0.5 s or longer than 20 s; 294 val and 492 test utterances from the same speakers.
+### Full comparison: CfC vs causal Transformer
+
+Both evaluated from the step-20k checkpoint with `scripts/pod/evaluate.sh` on an A40.
+
+**Test set** (492 utterances x 2 sampling seeds; WER interval is a 95% bootstrap over utterances):
+
+| Run | Params | WER | CER | UTMOS | Spk-sim | Duration ratio | First frame | GPU RTF |
+|---|---|---|---|---|---|---|---|---|
+| mimi-ceiling | — | 5.40% (4.71–6.12) | 2.41% | 3.83 | — | 1.000 | — | — |
+| CfC, 12 blocks | 69.9M | 8.58% (7.94–9.21) | 4.17% | 3.04 | 0.911 | 1.011 | 23 ms | 0.25 |
+| causal Transformer, 14 blocks | 70.9M | 8.37% (7.79–9.01) | 4.18% | 3.02 | 0.914 | 1.015 | 24 ms | 0.27 |
+
+Paired bootstrap, WER(CfC) - WER(Transformer): +0.21 points, 95% interval -0.36 … +0.80. The test set cannot tell the two apart on intelligibility, naturalness or speaker similarity. Both are 3 WER points and 0.8 UTMOS below the codec ceiling.
+
+**Long form** (`aqyn longform`: k consecutive test sentences joined into one text and generated as one stream; 30 paragraphs per length, 16 at k=16, 5 at k=48). Training clips are at most 20 s.
+
+| | 1 sent. (~5 s) | 2 (~12 s) | 4 (~23 s) | 8 (~45 s) | 16 (~89 s) | 48 (~269 s) |
+|---|---|---|---|---|---|---|
+| CfC, WER | 6.49% | 6.69% | 8.63% | 7.97% | 8.44% | 7.49% |
+| Transformer, WER | 5.92% | 7.32% | 9.29% | 15.19% | 28.20% | 56.79% |
+| CfC, CER | 2.9% | 2.9% | 3.7% | 3.7% | 3.6% | 3.5% |
+| Transformer, CER | 2.7% | 3.4% | 4.4% | 9.3% | 22.1% | 50.3% |
+| CfC, voice drift | 0.940 | 0.927 | 0.930 | 0.934 | 0.941 | 0.930 |
+| Transformer, voice drift | 0.937 | 0.921 | 0.928 | 0.919 | 0.903 | 0.858 |
+| CfC, duration ratio | 0.995 | 1.070 | 1.107 | 1.092 | 1.109 | 1.135 |
+| Transformer, duration ratio | 1.011 | 1.086 | 1.088 | 1.120 | 1.129 | 1.172 |
+
+Voice drift is the speaker similarity between the first and the last 4 s of the generated audio (higher is steadier). No generation of either model hit the frame limit.
+
+- CfC stays at 7–8.6% WER from 5 seconds to 4.5 minutes, with a steady voice. It was never trained on anything longer than 20 s.
+- The Transformer matches it up to the training length and then degrades: twice the WER at 45 s, more than half of the words wrong at 4.5 minutes, and the voice drifts.
+- Both speak about 10% slower on long texts than the summed references (which include no pauses between sentences).
+- The longest lengths have few paragraphs (16 and 5), so the exact numbers there are rough; the size of the gap is not.
+
+**Streaming cost** (`aqyn latency`, fp32, random weights, pod CPU with one thread and the A40):
+
+| | Stream | Backbone ms / frame | Last 50 frames | Depth ms / frame | RTF | State | Peak memory |
+|---|---|---|---|---|---|---|---|
+| CfC, CPU | 10 s | 18.5 | 19.1 | 18.6 | 0.46 | 24 KB | 822 MB |
+| CfC, CPU | 60 s | 16.6 | 16.3 | 16.5 | 0.41 | 24 KB | 844 MB |
+| CfC, CPU | 300 s | 16.3 | 15.6 | 16.2 | 0.41 | 24 KB | 912 MB |
+| Transformer, CPU | 10 s | 18.8 | 19.0 | 18.8 | 0.47 | 6.8 MB | 825 MB |
+| Transformer, CPU | 60 s | 21.7 | 25.3 | 16.7 | 0.48 | 41 MB | 895 MB |
+| Transformer, CPU | 300 s | 39.2 | 58.4 | 16.8 | 0.70 | 205 MB | 1162 MB |
+| CfC, GPU | 300 s | 4.9 | 4.9 | 11.5 | 0.20 | 24 KB | 351 MB |
+| Transformer, GPU | 300 s | 6.4 | 9.5 | 11.5 | 0.22 | 205 MB | 591 MB |
+
+On short streams the two cost the same, and half of every frame goes to the depth module they share. With length nothing changes for CfC, while the Transformer's key/value cache grows by about 0.7 MB per second of audio and its CPU step is three times slower by the fifth minute. On a GPU the difference in time is small; the difference in state is the same.
+
+**Training cost:** 0.60 s / step for the Transformer against about 1.4 for CfC on the same L40, i.e. 3.3 h against 8.0 h for 20k steps.
+
+**Against the decision rule.** CfC is within the interval of the Transformer on WER and speaker similarity, and it is clearly ahead on long form and on per-stream state, so by the rule fixed in advance it stays. What this does not settle:
+
+- The Transformer's long-form failure is most likely the sinusoidal frame positions past the 250 frames seen in training; attention with a local window (the hybrid config) or training on longer clips may behave differently. Not tested.
+- No LSTM control: a plain recurrent backbone behind the same text window may hold up just as well, in which case the result is about the design, not about CfC.
+- One training seed per backbone.
+
+### First pass (100 utterances)
+
+The first evaluation of the same CfC run and of an earlier Transformer run on the L40 used only the first 100 test utterances and one sampling seed. It is kept for the `best.pt` comparison; the full comparison above supersedes its WER numbers.
 
 | Run | Backbone | Params | WER | CER | Duration ratio | First frame | GPU RTF | s / step | Train time |
 |---|---|---|---|---|---|---|---|---|---|
@@ -74,12 +133,7 @@ Validation at step 20k (teacher forcing):
 | libritts_r_cfc | 4.27 | 4.21 | 1.59 | 0.33 | 0.59 | 0.89 |
 | libritts_r_transformer | 4.21 | 4.17 | 1.58 | 0.23 | 0.68 | 0.89 |
 
-What this does and does not show:
-
-- **Parity, not a win.** The two backbones are within one WER point on 100 utterances and one seed, which is inside the noise (CfC checkpoints at 12k / 16k / 20k steps scored 7.5% / 8.6% / 7.8%). The Transformer is slightly ahead on validation codes loss (by 0.03-0.04 throughout training), CfC slightly ahead on WER.
-- **Training cost.** The Transformer trains 2.3x faster per step; CfC runs one sequential step per frame.
-- **Inference.** Streaming generation costs the same for both on a GPU. CPU RTF, memory and per-stream state size, where CfC is expected to differ, are not measured yet.
-- **Not measured:** UTMOS (the eval skipped it: `torchaudio` was missing), speaker similarity, long-form drift, pointer robustness.
+On those 100 utterances the two backbones were within one WER point (CfC checkpoints at 12k / 16k / 20k steps scored 7.5% / 8.6% / 7.8%), which the full test set confirmed to be noise. The first 100 utterances are slightly easier than the rest: the ceiling is 4.9% there and 5.4% on all 492.
 
 ### The stop and advance heads overfit
 
@@ -99,25 +153,14 @@ The 69M CfC model overfits LJSpeech within a few thousand steps at this batch si
 
 The run was stopped at step 4k and not evaluated. LJSpeech stays useful for smoke tests only.
 
-### Streaming cost (preliminary)
-
-`aqyn latency`, one CPU thread on an Apple M1, random weights (cost does not depend on them), fp32. The depth module (8 codebooks per frame) is the same for every backbone and takes 9.4 ms per frame.
-
-| Backbone | Backbone ms / frame, 10 s stream | 60 s stream | Last 50 frames at 60 s | State after 60 s | Total RTF at 60 s |
-|---|---|---|---|---|---|
-| CfC | 8.5 | 8.5 | 8.4 | 24 KB | 0.22 |
-| LSTM | 8.8 | 8.9 | 8.7 | 44 KB | 0.23 |
-| CfC + local attention | 8.3 | 8.4 | 8.3 | 1.6 MB | 0.22 |
-| Causal Transformer | 9.0 | 10.2 | 11.7 | 41 MB | 0.25 |
-
-On short streams the backbones cost the same; the Transformer's key/value cache grows by about 0.7 MB per second of audio and its step slows down with it. Whether that matters is a question about long sessions and many parallel streams, which is what the comparison below measures (5-minute streams, server CPU and GPU).
-
 ### Open items from these runs
 
-- Second seed and a larger test set before any claim about CfC vs Transformer.
+- LSTM control and the hybrid with the same recipe; a second training seed.
+- A Transformer with relative or windowed positions, to separate "attention" from "absolute positions" in the long-form failure.
+- The 0.8 UTMOS gap to the codec ceiling, common to both backbones.
 - Regularize the stop / advance heads.
 
-## Comparison protocol (next runs)
+## Comparison protocol
 
 The question: is CfC better than the alternatives at anything, or only not worse? One command per backbone (`scripts/pod/queue.sh`), the same recipe as above, with `best.pt` now selected by validation codes loss.
 

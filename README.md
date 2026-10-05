@@ -6,7 +6,7 @@
 
 This is an open research project by [Manifestro](https://github.com/Manifestro). The fast part runs on [Mimi](https://huggingface.co/kyutai/mimi) codec tokens at 12.5 Hz and is built around Closed-form Continuous-time (CfC / LTC) networks, compared against Mamba2, LSTM and Transformer backbones.
 
-> **Status:** Stage 1 (streaming TTS on the spinal cord) is implemented and trained on LibriTTS-R. In the first matched comparison the CfC backbone is on par with a causal Transformer (WER 7.8% vs 8.8%, Mimi ceiling 4.9%; one seed, 100 utterances). English first for fast iteration; Russian and Kazakh data are being collected.
+> **Status:** Stage 1 (streaming TTS on the spinal cord) is implemented and trained on LibriTTS-R. Against a matched causal Transformer, CfC is equal on short utterances (WER 8.6% vs 8.4%, Mimi ceiling 5.4%) and stays at 7–8% WER on streams up to 4.5 minutes, where the Transformer degrades to 57%. English first for fast iteration; Russian and Kazakh data are being collected.
 
 ---
 
@@ -51,17 +51,28 @@ Details are in [docs/architecture.md](docs/architecture.md).
 | 2 | Hearing and turn-taking: backchannels, interruptions, yielding the floor (including synthetic dialogues) | a reactive voice front end |
 | 3 | Connect the cortex through the text queue; tool calls during conversation | the full system |
 
-## First results
+## Results so far
 
-Both models: ~70M parameters, LibriTTS-R `train-clean-100` + `train-clean-360` (229 h, 1151 speakers), 20k steps, batches of 26k Mimi frames, one NVIDIA L40. Scores are on 100 held-out test utterances, transcribed with Whisper large-v3-turbo.
+CfC vs a causal Transformer, both ~70M parameters, same data (LibriTTS-R `train-clean-100` + `train-clean-360`, 229 h, 1151 speakers), same recipe (20k steps, 26k Mimi frames per batch). ASR: Whisper large-v3-turbo.
 
-| Model | WER | CER | Val codes loss | First frame | RTF (GPU) | Train time |
+**Short utterances: no difference.** Whole test set, 492 utterances x 2 sampling seeds:
+
+| Model | WER (95% CI) | UTMOS | Speaker similarity |
+|---|---|---|---|
+| Mimi ceiling (encode/decode only) | 5.40% (4.71–6.12) | 3.83 | — |
+| CfC, 12 blocks | 8.58% (7.94–9.21) | 3.04 | 0.911 |
+| Causal Transformer, 14 blocks | 8.37% (7.79–9.01) | 3.02 | 0.914 |
+
+**Long streams: CfC holds, the Transformer falls apart.** Training clips are at most 20 s; here paragraphs of joined test sentences are generated in one stream:
+
+| Stream length | ~5 s | ~12 s | ~23 s | ~45 s | ~89 s | ~4.5 min |
 |---|---|---|---|---|---|---|
-| Mimi ceiling (encode/decode only) | 4.9% | 2.2% | — | — | — | — |
-| CfC, 12 blocks | 7.8% | 3.4% | 4.21 | 29 ms | 0.27 | 8.0 h |
-| Causal Transformer, 14 blocks | 8.8% | 4.1% | 4.17 | 29 ms | 0.27 | 3.3 h |
+| CfC, WER | 6.5% | 6.7% | 8.6% | 8.0% | 8.4% | 7.5% |
+| Transformer, WER | 5.9% | 7.3% | 9.3% | 15.2% | 28.2% | 56.8% |
 
-One seed and 100 utterances: the WER gap is within noise, so read this as "CfC is not worse", not "CfC is better". Naturalness (UTMOS) and speaker similarity are not measured yet. Full numbers and what went wrong on the way are in [docs/experiments.md](docs/experiments.md#results).
+**Streaming cost.** A CfC stream keeps 24 KB of state at any length; the Transformer's cache reaches 205 MB after five minutes and its step on one CPU thread slows from 19 ms to 58 ms per frame (CfC: 16–19 ms throughout). On short streams and on a GPU the two cost the same. CfC trains 2.3x slower per step.
+
+So CfC is not better at short utterances; it is better at exactly what the design asks of the spinal cord: an open-ended stream with constant memory. Caveats: one training seed per backbone, few paragraphs at the longest lengths (16 and 5), and no LSTM control yet, so "CfC" may turn out to mean "any recurrent backbone behind the text window". Full tables are in [docs/experiments.md](docs/experiments.md#results).
 
 Stage 1 metrics: WER through ASR, speaker similarity, stress accuracy on homographs (human listening), 5-minute generations without voice or tempo drift, time to first audio, RTF. Decision rule fixed in advance: if CfC is within 10% of the best backbone on WER and speaker similarity while clearly better on memory and latency, keep it; otherwise use Mamba2. See [docs/experiments.md](docs/experiments.md).
 
@@ -108,7 +119,7 @@ uv run aqyn eval --ceiling --data data/libritts_r_tokens --out results/ceiling -
 uv run aqyn eval --ckpt runs/libritts_r_cfc/last.pt --out results/cfc_last --num 100
 ```
 
-The second block is the exact recipe behind the numbers above (the Transformer run only swaps the config); 26k frames per batch needs a 48 GB GPU.
+The second block is the training recipe behind the results above (the Transformer run only swaps the config); 26k frames per batch needs a 48 GB GPU. The evaluation that produced the tables is `scripts/pod/evaluate.sh`, described below.
 
 ### Reproducing the backbone comparison
 
@@ -191,7 +202,8 @@ docs/                 architecture, experiment protocol
 - [x] Stage 1 model: text window + word pointer, acoustic delay, control and stop heads
 - [x] Training, synthesis, evaluation (ASR WER/CER, UTMOS, latency, Mimi ceiling), speed benchmark
 - [x] Stage 1: first trained models on multi-speaker English (LibriTTS-R): CfC vs causal Transformer
-- [ ] Stage 1: remaining backbones (LSTM, hybrid, Mamba2), second seed, UTMOS and speaker similarity
+- [x] Stage 1: full-test evaluation with UTMOS and speaker similarity, long-form test, streaming cost
+- [ ] Stage 1: remaining backbones (LSTM, hybrid, Mamba2), second training seed
 - [ ] Stage 1: overfitting of the stop / advance heads
 - [ ] Stage 1: Russian and Kazakh data, stress marks, 5-minute drift test
 - [ ] Stage 2: hearing and turn-taking
